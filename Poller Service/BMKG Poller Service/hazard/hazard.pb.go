@@ -13,8 +13,8 @@ import (
 
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
-	anypb "google.golang.org/protobuf/types/known/anypb"
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
+	structpb "google.golang.org/protobuf/types/known/structpb"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -190,7 +190,7 @@ type Hazard struct {
 	Longitude     float64                `protobuf:"fixed64,8,opt,name=longitude,proto3" json:"longitude,omitempty"`
 	OccurredAt    *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=occurred_at,json=occurredAt,proto3" json:"occurred_at,omitempty"`
 	IngestedAt    *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=ingested_at,json=ingestedAt,proto3" json:"ingested_at,omitempty"`
-	Attributes    map[string]*anypb.Any  `protobuf:"bytes,11,rep,name=attributes,proto3" json:"attributes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Attributes    *structpb.Struct       `protobuf:"bytes,11,opt,name=attributes,proto3" json:"attributes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -295,7 +295,7 @@ func (x *Hazard) GetIngestedAt() *timestamppb.Timestamp {
 	return nil
 }
 
-func (x *Hazard) GetAttributes() map[string]*anypb.Any {
+func (x *Hazard) GetAttributes() *structpb.Struct {
 	if x != nil {
 		return x.Attributes
 	}
@@ -306,7 +306,7 @@ var File_hazard_proto protoreflect.FileDescriptor
 
 const file_hazard_proto_rawDesc = "" +
 	"\n" +
-	"\fhazard.proto\x12\x06hazard\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x19google/protobuf/any.proto\x1a\x1bgoogle/protobuf/empty.proto\"\xba\x04\n" +
+	"\fhazard.proto\x12\x06hazard\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1bgoogle/protobuf/empty.proto\"\xde\x03\n" +
 	"\x06Hazard\x12\x1b\n" +
 	"\thazard_id\x18\x01 \x01(\tR\bhazardId\x12&\n" +
 	"\x06source\x18\x02 \x01(\x0e2\x0e.hazard.SourceR\x06source\x12\"\n" +
@@ -321,13 +321,10 @@ const file_hazard_proto_rawDesc = "" +
 	"occurredAt\x12;\n" +
 	"\vingested_at\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"ingestedAt\x12>\n" +
+	"ingestedAt\x127\n" +
 	"\n" +
-	"attributes\x18\v \x03(\v2\x1e.hazard.Hazard.AttributesEntryR\n" +
-	"attributes\x1aS\n" +
-	"\x0fAttributesEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12*\n" +
-	"\x05value\x18\x02 \x01(\v2\x14.google.protobuf.AnyR\x05value:\x028\x01*5\n" +
+	"attributes\x18\v \x01(\v2\x17.google.protobuf.StructR\n" +
+	"attributes*5\n" +
 	"\x06Source\x12\x16\n" +
 	"\x12SOURCE_UNSPECIFIED\x10\x00\x12\b\n" +
 	"\x04BMKG\x10\x01\x12\t\n" +
@@ -360,32 +357,30 @@ func file_hazard_proto_rawDescGZIP() []byte {
 }
 
 var file_hazard_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_hazard_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_hazard_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
 var file_hazard_proto_goTypes = []any{
 	(Source)(0),                   // 0: hazard.Source
 	(HazardType)(0),               // 1: hazard.HazardType
 	(Severity)(0),                 // 2: hazard.Severity
 	(*Hazard)(nil),                // 3: hazard.Hazard
-	nil,                           // 4: hazard.Hazard.AttributesEntry
-	(*timestamppb.Timestamp)(nil), // 5: google.protobuf.Timestamp
-	(*anypb.Any)(nil),             // 6: google.protobuf.Any
-	(*emptypb.Empty)(nil),         // 7: google.protobuf.Empty
+	(*timestamppb.Timestamp)(nil), // 4: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),       // 5: google.protobuf.Struct
+	(*emptypb.Empty)(nil),         // 6: google.protobuf.Empty
 }
 var file_hazard_proto_depIdxs = []int32{
 	0, // 0: hazard.Hazard.source:type_name -> hazard.Source
 	1, // 1: hazard.Hazard.hazard_type:type_name -> hazard.HazardType
 	2, // 2: hazard.Hazard.severity:type_name -> hazard.Severity
-	5, // 3: hazard.Hazard.occurred_at:type_name -> google.protobuf.Timestamp
-	5, // 4: hazard.Hazard.ingested_at:type_name -> google.protobuf.Timestamp
-	4, // 5: hazard.Hazard.attributes:type_name -> hazard.Hazard.AttributesEntry
-	6, // 6: hazard.Hazard.AttributesEntry.value:type_name -> google.protobuf.Any
-	3, // 7: hazard.Aggregate.aggregateEvent:input_type -> hazard.Hazard
-	7, // 8: hazard.Aggregate.aggregateEvent:output_type -> google.protobuf.Empty
-	8, // [8:9] is the sub-list for method output_type
-	7, // [7:8] is the sub-list for method input_type
-	7, // [7:7] is the sub-list for extension type_name
-	7, // [7:7] is the sub-list for extension extendee
-	0, // [0:7] is the sub-list for field type_name
+	4, // 3: hazard.Hazard.occurred_at:type_name -> google.protobuf.Timestamp
+	4, // 4: hazard.Hazard.ingested_at:type_name -> google.protobuf.Timestamp
+	5, // 5: hazard.Hazard.attributes:type_name -> google.protobuf.Struct
+	3, // 6: hazard.Aggregate.aggregateEvent:input_type -> hazard.Hazard
+	6, // 7: hazard.Aggregate.aggregateEvent:output_type -> google.protobuf.Empty
+	7, // [7:8] is the sub-list for method output_type
+	6, // [6:7] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_hazard_proto_init() }
@@ -399,7 +394,7 @@ func file_hazard_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_hazard_proto_rawDesc), len(file_hazard_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   2,
+			NumMessages:   1,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

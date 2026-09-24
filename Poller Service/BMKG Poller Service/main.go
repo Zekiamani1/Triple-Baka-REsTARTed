@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -63,6 +63,12 @@ func poll(since time.Time) []SeismicEvent {
 	return raw
 }
 func normalize(data SeismicEvent) hazard.Hazard {
+	attribute, _ := structpb.NewStruct(
+		map[string]any{
+			"magnitude":         data.Magnitude,
+			"depth_km":          data.DepthKM,
+			"potential_tsunami": data.PotentialTsunami,
+		})
 	return hazard.Hazard{
 
 		HazardId:    uuid.NewString(),
@@ -77,7 +83,7 @@ func normalize(data SeismicEvent) hazard.Hazard {
 		Longitude:  data.EpicenterLon,
 		OccurredAt: timestamppb.New(data.OccurredAt),
 		IngestedAt: timestamppb.New(time.Now()),
-		Attributes: map[string]*anypb.Any{}, //belum
+		Attributes: attribute,
 	}
 }
 func main() {
