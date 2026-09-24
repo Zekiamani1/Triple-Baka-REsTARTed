@@ -1,0 +1,16 @@
+services:
+  mongo-aggregate:
+    image: mongo:8
+    ports:
+      - "27017:27017"
+  kafka-aggregate:
+    image: apache/kafka:latest
+    ports:
+      - "9092:9092"
+  aggregate:
+    build: "./Aggregate Service"
+    ports:
+      - "50051:50051"
+    depends_on:
+      - mongo-aggregate
+      - kafka-aggregate
