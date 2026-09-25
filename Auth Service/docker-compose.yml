@@ -1,0 +1,13 @@
+services:
+  auth-service:
+    build: .
+    container_name: auth-service
+
+    ports:
+      - "8083:8083"
+
+    env_file:
+      - .env
+
+    volumes:
+      - ./keys:/app/keys:ro
