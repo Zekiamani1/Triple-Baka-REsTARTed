@@ -46,29 +46,80 @@ func SendToAggregate(thething *hazard.Hazard) {
 	client := hazard.NewAggregateClient(conn)
 	client.AggregateEvent(context.Background(), thething)
 }
-func poll(since time.Time) []SeismicEvent {
+
+type fetchresult[T any] struct {
+	err    error
+	result T
+}
+
+func fetchSeismicEvent(since time.Time, channel chan fetchresult[[]SeismicEvent]) {
+	var events []SeismicEvent
 	bmkgadress := "http://localhost:6767"
 
 	targeturl := fmt.Sprintf("%s/seismic-events?since=%s", bmkgadress, url.QueryEscape(since.Format(time.RFC3339)))
 	resp, err := http.Get(targeturl)
 	if err != nil {
-		log.Fatal(err.Error())
+		log.Print(err.Error())
+		channel <- fetchresult[[]SeismicEvent]{err: err, result: nil}
+		return
 	}
 	defer resp.Body.Close()
-	var raw []SeismicEvent
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
 		log.Printf("Error decoding JSON: %v", err)
-		return nil
+		channel <- fetchresult[[]SeismicEvent]{err: err, result: nil}
+		return
 	}
-	return raw
+	channel <- fetchresult[[]SeismicEvent]{err: nil, result: events}
 }
-func normalize(data SeismicEvent) hazard.Hazard {
-	attribute, _ := structpb.NewStruct(
-		map[string]any{
-			"magnitude":         data.Magnitude,
-			"depth_km":          data.DepthKM,
-			"potential_tsunami": data.PotentialTsunami,
-		})
+func fetchTsunamiWarning(since time.Time, channel chan fetchresult[[]TsunamiWarning]) {
+	var warnings []TsunamiWarning
+	bmkgadress := "http://localhost:6767"
+
+	targeturl := fmt.Sprintf("%s/tsunami-warning?since=%s", bmkgadress, url.QueryEscape(since.Format(time.RFC3339)))
+	resp, err := http.Get(targeturl)
+	if err != nil {
+		log.Print(err.Error())
+		channel <- fetchresult[[]TsunamiWarning]{err: err, result: nil}
+		return
+	}
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&warnings); err != nil {
+		log.Printf("Error decoding JSON: %v", err)
+		channel <- fetchresult[[]TsunamiWarning]{err: err, result: nil}
+		return
+	}
+	channel <- fetchresult[[]TsunamiWarning]{err: nil, result: warnings}
+}
+func poll(since time.Time) ([]SeismicEvent, []TsunamiWarning, error) {
+	chan1 := make(chan fetchresult[[]SeismicEvent])
+	chan2 := make(chan fetchresult[[]TsunamiWarning])
+	result1 := <-chan1
+	if result1.err != nil {
+		return nil, nil, result1.err
+	}
+	result2 := <-chan2
+	if result2.err != nil {
+		return nil, nil, result2.err
+	}
+	return result1.result, result2.result, nil
+}
+func normalize(data SeismicEvent, warnings []TsunamiWarning) hazard.Hazard {
+	attributemap := map[string]any{
+		"magnitude":         data.Magnitude,
+		"depth_km":          data.DepthKM,
+		"potential_tsunami": data.PotentialTsunami,
+	}
+	if data.PotentialTsunami {
+		for _, warn := range warnings {
+			if warn.RelatedEventID == data.EventID {
+				attributemap["warning_id"] = warn.WarningID
+				attributemap["affected_zones"] = warn.AffectedZones
+				attributemap["threat_level"] = warn.ThreatLevel
+				attributemap["estimated_arrival"] = warn.EstimatedArrival
+			}
+		}
+	}
+	attribute, _ := structpb.NewStruct(attributemap)
 	return hazard.Hazard{
 
 		HazardId:    uuid.NewString(),
@@ -87,14 +138,17 @@ func normalize(data SeismicEvent) hazard.Hazard {
 	}
 }
 func main() {
+	sleeptime := 3
 	now := time.Now()
 	for true {
-		time.Sleep(3 * time.Second)
-		datas := poll(now)
+		time.Sleep(time.Duration(sleeptime) * time.Second)
+		events, warnings, _ := poll(now)
 		now = time.Now()
-		for _, data := range datas {
-			normalized := normalize(data)
-			SendToAggregate(&normalized)
+		for _, data := range events {
+			go func() {
+				normalized := normalize(data, warnings)
+				SendToAggregate(&normalized)
+			}()
 		}
 	}
 }
