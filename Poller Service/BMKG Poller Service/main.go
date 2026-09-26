@@ -58,12 +58,14 @@ func fetchSeismicEvent(since time.Time, channel chan fetchresult[[]SeismicEvent]
 
 	targeturl := fmt.Sprintf("%s/seismic-events?since=%s", bmkgadress, url.QueryEscape(since.Format(time.RFC3339)))
 	resp, err := http.Get(targeturl)
+
 	if err != nil {
 		log.Print(err.Error())
 		channel <- fetchresult[[]SeismicEvent]{err: err, result: nil}
 		return
 	}
 	defer resp.Body.Close()
+
 	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
 		log.Printf("Error decoding JSON: %v", err)
 		channel <- fetchresult[[]SeismicEvent]{err: err, result: nil}
@@ -75,7 +77,7 @@ func fetchTsunamiWarning(since time.Time, channel chan fetchresult[[]TsunamiWarn
 	var warnings []TsunamiWarning
 	bmkgadress := "http://localhost:6767"
 
-	targeturl := fmt.Sprintf("%s/tsunami-warning?since=%s", bmkgadress, url.QueryEscape(since.Format(time.RFC3339)))
+	targeturl := fmt.Sprintf("%s/tsunami-warnings?since=%s", bmkgadress, url.QueryEscape(since.Format(time.RFC3339)))
 	resp, err := http.Get(targeturl)
 	if err != nil {
 		log.Print(err.Error())
@@ -93,6 +95,8 @@ func fetchTsunamiWarning(since time.Time, channel chan fetchresult[[]TsunamiWarn
 func poll(since time.Time) ([]SeismicEvent, []TsunamiWarning, error) {
 	chan1 := make(chan fetchresult[[]SeismicEvent])
 	chan2 := make(chan fetchresult[[]TsunamiWarning])
+	go fetchSeismicEvent(since, chan1)
+	go fetchTsunamiWarning(since, chan2)
 	result1 := <-chan1
 	if result1.err != nil {
 		return nil, nil, result1.err
@@ -115,11 +119,15 @@ func normalize(data SeismicEvent, warnings []TsunamiWarning) hazard.Hazard {
 				attributemap["warning_id"] = warn.WarningID
 				attributemap["affected_zones"] = warn.AffectedZones
 				attributemap["threat_level"] = warn.ThreatLevel
-				attributemap["estimated_arrival"] = warn.EstimatedArrival
+				attributemap["estimated_arrival"] = warn.EstimatedArrival.Format(time.RFC3339)
 			}
 		}
 	}
-	attribute, _ := structpb.NewStruct(attributemap)
+
+	attribute, err := structpb.NewStruct(attributemap)
+	if err != nil {
+		println(err.Error())
+	}
 	return hazard.Hazard{
 
 		HazardId:    uuid.NewString(),
