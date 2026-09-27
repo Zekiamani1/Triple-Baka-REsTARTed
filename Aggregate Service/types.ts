@@ -1,3 +1,4 @@
+export type Source =
   | "BMKG"
   | "PVMBG";
 
@@ -16,7 +17,7 @@ export interface HazardEvent {
     source: Source;
     source_ref_id: string;
     hazard_type: HazardType;
-    severity: Severity;
+    severity: HazardSeverity;
     area_name: string;
     latitude: number;
     longitude: number;

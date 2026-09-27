@@ -2,7 +2,12 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import path from "path";
 import { MongoClient } from "mongodb";
-import { hazardEvent } from "./types"
+import { kafka, mongo, service } from "./config";
+import {
+  connectKafka,
+  disconnectKafka,
+  publishHazard,
+} from "./kafkabridge";
 
 const packageDefinition = protoLoader.loadSync(path.resolve("proto/hazard.proto"), {
   keepCase: true,
@@ -14,9 +19,7 @@ const packageDefinition = protoLoader.loadSync(path.resolve("proto/hazard.proto"
 
 const proto = grpc.loadPackageDefinition(packageDefinition) as any;
 
-const mongoClient = new MongoClient(
-  "mongodb://mongo-aggregate:27017"
-);
+const mongoClient = new MongoClient(mongo.uri);
 
 let collection: any;
 
@@ -44,7 +47,11 @@ async function aggregateEvent (call: grpc.ServerUnaryCall<any, any>, callback: g
         
         const hazardEvent = protoToHazard(call.request);
     
-        const result = await collection.insertOne(hazardEvent);
+        // MongoDB adds _id to the object passed to insertOne. Store a copy so
+        // the canonical Kafka event stays independent of persistence details.
+        await collection.insertOne({ ...hazardEvent });
+
+        await publishHazard(hazardEvent);
 
         callback(null, {})
     }
@@ -58,16 +65,17 @@ async function aggregateEvent (call: grpc.ServerUnaryCall<any, any>, callback: g
 
 async function main () {
     await mongoClient.connect();
+    await connectKafka();
 
-    const db = mongoClient.db("bnpb");
-    collection = db.collection("hazard_events");
+    const db = mongoClient.db(mongo.dbName);
+    collection = db.collection(mongo.collection);
 
     const server = new grpc.Server();
 
     server.addService(hazardPackage.Aggregate.service, {aggregateEvent} );
 
     server.bindAsync(
-    "0.0.0.0:50051",
+    `0.0.0.0:${service.port}`,
     grpc.ServerCredentials.createInsecure(),
         (error, port) => {
             if (error) {
@@ -76,8 +84,21 @@ async function main () {
             }
 
             console.log(`gRPC listening on ${port}`);
+            console.log(`Publishing HazardEvents to Kafka topic ${kafka.outTopic}`);
         }
     );
 }
 
-main();
+async function shutdown() {
+  await disconnectKafka();
+  await mongoClient.close();
+  process.exit(0);
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+main().catch(async (error) => {
+  console.error("Aggregate Service failed to start", error);
+  await mongoClient.close().catch(() => undefined);
+  process.exit(1);
+});

@@ -1,9 +1,17 @@
+function required(name: string, fallback?: string): string {
+  const value = process.env[name] ?? fallback;
+
+  if (!value || value.trim() === "") {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+
+  return value;
+}
+
 export const kafka = {
   brokers: required('KAFKA_BROKERS', 'localhost:9092').split(','),
   clientId: required('KAFKA_CLIENT_ID', 'bnpb-aggregate-service'),
-  inTopic: required('KAFKA_TOPIC_CANONICAL_RAW', 'canonical-events-raw'),
   outTopic: required('KAFKA_TOPIC_HAZARD_EVENTS', 'hazard-events'),
-  consumerGroupId: required('KAFKA_CONSUMER_GROUP', 'aggregate-group'),
 };
  
 export const mongo = {
@@ -13,5 +21,5 @@ export const mongo = {
 };
  
 export const service = {
-  port: parseInt(required('AGGREGATOR_PORT', '8090'), 10),
+  port: parseInt(required('AGGREGATOR_PORT', '50051'), 10),
 };
