@@ -121,12 +121,33 @@ func normalize(data SeismicEvent, warnings []TsunamiWarning) hazard.Hazard {
 				attributemap["threat_level"] = warn.ThreatLevel
 				attributemap["estimated_arrival"] = warn.EstimatedArrival.Format(time.RFC3339)
 			}
+			break
 		}
 	}
 
 	attribute, err := structpb.NewStruct(attributemap)
 	if err != nil {
 		println(err.Error())
+	}
+	var severity hazard.Severity
+
+	switch attributemap["threat_level"] {
+	case "Waspada":
+		severity = hazard.Severity_WASPADA
+	case "Siaga":
+		severity = hazard.Severity_SIAGA
+	case "Awas":
+		severity = hazard.Severity_AWAS
+	default:
+		switch {
+		case data.Magnitude < 5.0:
+			severity = hazard.Severity_NORMAL
+		case 5.0 <= data.Magnitude && data.Magnitude <= 6.5:
+			severity = hazard.Severity_WASPADA
+		case 6.5 < data.Magnitude:
+			severity = hazard.Severity_SIAGA
+
+		}
 	}
 	return hazard.Hazard{
 
@@ -135,7 +156,7 @@ func normalize(data SeismicEvent, warnings []TsunamiWarning) hazard.Hazard {
 		SourceRefId: data.EventID,
 		HazardType:  hazard.HazardType_SEISMIC,
 
-		Severity: hazard.Severity_WASPADA, //belum
+		Severity: severity,
 
 		AreaName:   data.RegionName,
 		Latitude:   data.EpicenterLat,
