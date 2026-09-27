@@ -8,6 +8,8 @@ package hazard;
 
 service Aggregate {
     rpc aggregateEvent(Hazard) returns (google.protobuf.Empty);
+    rpc GetHazard(GetHazardRequest) returns (Hazard);
+    rpc ListHazards(ListHazardsRequest) returns (ListHazardsResponse);
 }
 enum Source {
     SOURCE_UNSPECIFIED = 0;
@@ -38,4 +40,21 @@ message Hazard {
   google.protobuf.Timestamp occurred_at = 9;
   google.protobuf.Timestamp ingested_at = 10;
   map<string, google.protobuf.Any> attributes = 11;
+}
+
+message GetHazardRequest {
+    string hazard_id = 1;
+}
+
+message ListHazardsRequest {
+    Source source = 1;
+    HazardType hazard_type = 2;
+    Severity severity = 3;
+    int32 limit = 4;
+    int32 offset = 5;
+}
+
+message ListHazardsResponse {
+  repeated Hazard hazards = 1;
+  int32 total = 2;
 }

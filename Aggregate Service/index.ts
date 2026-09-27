@@ -41,23 +41,98 @@ function protoToHazard(protoHazard: any) {
     }
 }
 
+async function checkIdempotency(hazardEvent: any): Promise<boolean> {
+    const existingEvent = await collection.findOne({
+        source: hazardEvent.source,
+        source_ref_id: hazardEvent.source_ref_id,
+    });
+    return existingEvent !== null;
+}
+
 async function aggregateEvent (call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) {
     try {
         console.log(call.request);
         
         const hazardEvent = protoToHazard(call.request);
     
-        // MongoDB adds _id to the object passed to insertOne. Store a copy so
-        // the canonical Kafka event stays independent of persistence details.
-        await collection.insertOne({ ...hazardEvent });
+        if (await checkIdempotency(hazardEvent)) {
+            console.log(`Duplicate hazard event with source_ref_id ${hazardEvent.source_ref_id} ignored`);
+            callback(null, {});
+            return;
+        }
 
+        try {
+            await collection.insertOne({ ...hazardEvent });
+        } catch (error: any) {
+            if (error?.code === 11000) {
+                console.log(`Duplicate hazard event with source_ref_id ${hazardEvent.source_ref_id} ignored`);
+                callback(null, {});
+                return;
+            }
+            throw error;
+        }
         await publishHazard(hazardEvent);
 
         callback(null, {})
     }
     catch (error) {
         console.error(error);
+        callback({code: grpc.status.INTERNAL});
+    }
+}
 
+async function listHazards(call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) {
+    try {
+        const req = call.request;
+        const filter: Record<string, unknown> = {};
+
+        if (req.source && req.source.trim() !== "SOURCE_UNSPECIFIED") {
+            filter.source = req.source;
+        }
+
+        if (req.hazard_type && req.hazard_type.trim() !== "HAZARD_TYPE_UNSPECIFIED") {
+            filter.hazard_type = req.hazard_type;
+        }
+
+        if (req.severity && req.severity.trim() !== "SEVERITY_UNSPECIFIED") {
+            filter.severity = req.severity;
+        }
+
+        const limit = req.limit && req.limit > 0 ? (req.limit > 100 ? 100 : req.limit) : 10;
+        const offset = req.offset && req.offset >= 0 ? req.offset : 0;
+
+        const [hazards, total] = await Promise.all([
+            collection.find(filter, { projection: { _id: 0 }}).skip(offset).limit(limit).toArray(),
+            collection.countDocuments(filter),
+        ]);
+
+        callback(null, { hazards, total });
+    } catch (error) {
+        console.error(error);
+        callback({code: grpc.status.INTERNAL});
+    }
+}
+
+async function getHazard(call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) {
+    try {
+        const hazardId = call.request.hazard_id;
+
+        if (!hazardId) {
+            callback({code: grpc.status.INVALID_ARGUMENT, message: "hazard_id is required"});
+
+            return;
+        }
+
+        const hazardEvent = await collection.findOne({ hazard_id: hazardId }, { projection: { _id: 0 } });
+
+        if (!hazardEvent) {
+            callback({code: grpc.status.NOT_FOUND, message: `Hazard event with hazard_id ${hazardId} not found`});
+            return;
+        }
+
+        callback(null, hazardEvent);
+    } catch (error) {
+        console.error(error);
         callback({code: grpc.status.INTERNAL});
     }
 }
@@ -65,14 +140,22 @@ async function aggregateEvent (call: grpc.ServerUnaryCall<any, any>, callback: g
 
 async function main () {
     await mongoClient.connect();
-    await connectKafka();
 
     const db = mongoClient.db(mongo.dbName);
     collection = db.collection(mongo.collection);
+    await collection.createIndex({ source: 1, source_ref_id: 1 }, { unique: true });
+    await collection.createIndex({ hazard_id: 1 });
+
+    await connectKafka();
+
 
     const server = new grpc.Server();
 
-    server.addService(hazardPackage.Aggregate.service, {aggregateEvent} );
+    server.addService(hazardPackage.Aggregate.service, {
+        aggregateEvent,
+        getHazard,
+        listHazards,
+    } );
 
     server.bindAsync(
     `0.0.0.0:${service.port}`,
