@@ -74,19 +74,30 @@ func normalize(data VolcanoReport) proto.Hazard {
 	if err != nil {
 		println(err.Error())
 	}
+	var severity proto.Severity
+	switch data.AlertLevel {
+	case "Normal":
+		severity = proto.Severity_NORMAL
+	case "Waspada":
+		severity = proto.Severity_WASPADA
+	case "Siaga":
+		severity = proto.Severity_SIAGA
+	case "Awas":
+		severity = proto.Severity_AWAS
+	}
 	return proto.Hazard{
 
 		HazardId:    uuid.NewString(),
 		Source:      proto.Source_BMKG,
 		SourceRefId: data.ReportID,
 		HazardType:  proto.HazardType_VOLCANIC,
-
-		Severity: proto.Severity_WASPADA,
-
-		AreaName:   data.VolcanoID,
-		OccurredAt: timestamppb.New(data.ReportedAt),
-		IngestedAt: timestamppb.New(time.Now()),
-		Attributes: attribute,
+		Longitude:   0,
+		Latitude:    0, //belum
+		Severity:    severity,
+		AreaName:    data.VolcanoID,
+		OccurredAt:  timestamppb.New(data.ReportedAt),
+		IngestedAt:  timestamppb.New(time.Now()),
+		Attributes:  attribute,
 	}
 }
 func main() {
