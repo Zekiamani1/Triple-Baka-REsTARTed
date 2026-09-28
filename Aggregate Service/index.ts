@@ -7,6 +7,7 @@ import {
   connectKafka,
   disconnectKafka,
   publishHazard,
+  runIngestConsumer,
 } from "./kafkabridge";
 
 const packageDefinition = protoLoader.loadSync(path.resolve("proto/hazard.proto"), {
@@ -41,12 +42,49 @@ function protoToHazard(protoHazard: any) {
     }
 }
 
-async function checkIdempotency(hazardEvent: any): Promise<boolean> {
-    const existingEvent = await collection.findOne({
+function withoutDeliveryState(document: any): Record<string, unknown> {
+    const { _id, published, published_at, ...hazardEvent } = document;
+    return hazardEvent;
+}
+
+async function ingestHazard(hazardEvent: any): Promise<void> {
+    const identity = {
         source: hazardEvent.source,
         source_ref_id: hazardEvent.source_ref_id,
+    };
+
+    let eventToPublish = hazardEvent;
+
+    try {
+        await collection.insertOne({ ...hazardEvent, published: false });
+    } catch (error: any) {
+        if (error?.code !== 11000) {
+            throw error;
+        }
+
+        const existingEvent = await collection.findOne(identity);
+        if (existingEvent?.published) {
+            console.log(`Duplicate hazard event with source_ref_id ${hazardEvent.source_ref_id} ignored`);
+            return;
+        }
+
+        if (!existingEvent) {
+            throw error;
+        }
+
+        eventToPublish = withoutDeliveryState(existingEvent);
+    }
+
+    await publishHazard(eventToPublish);
+    await collection.updateOne(identity, {
+        $set: { published: true, published_at: new Date() },
     });
-    return existingEvent !== null;
+
+    console.log("HazardEvent processed", {
+        source: eventToPublish.source,
+        source_ref_id: eventToPublish.source_ref_id,
+        hazard_id: eventToPublish.hazard_id,
+    });
 }
 
 async function aggregateEvent (call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) {
@@ -54,24 +92,8 @@ async function aggregateEvent (call: grpc.ServerUnaryCall<any, any>, callback: g
         console.log(call.request);
         
         const hazardEvent = protoToHazard(call.request);
-    
-        if (await checkIdempotency(hazardEvent)) {
-            console.log(`Duplicate hazard event with source_ref_id ${hazardEvent.source_ref_id} ignored`);
-            callback(null, {});
-            return;
-        }
 
-        try {
-            await collection.insertOne({ ...hazardEvent });
-        } catch (error: any) {
-            if (error?.code === 11000) {
-                console.log(`Duplicate hazard event with source_ref_id ${hazardEvent.source_ref_id} ignored`);
-                callback(null, {});
-                return;
-            }
-            throw error;
-        }
-        await publishHazard(hazardEvent);
+        await ingestHazard(hazardEvent);
 
         callback(null, {})
     }
@@ -102,7 +124,7 @@ async function listHazards(call: grpc.ServerUnaryCall<any, any>, callback: grpc.
         const offset = req.offset && req.offset >= 0 ? req.offset : 0;
 
         const [hazards, total] = await Promise.all([
-            collection.find(filter, { projection: { _id: 0 }}).skip(offset).limit(limit).toArray(),
+            collection.find(filter, { projection: { _id: 0, published: 0, published_at: 0 }}).skip(offset).limit(limit).toArray(),
             collection.countDocuments(filter),
         ]);
 
@@ -123,7 +145,10 @@ async function getHazard(call: grpc.ServerUnaryCall<any, any>, callback: grpc.se
             return;
         }
 
-        const hazardEvent = await collection.findOne({ hazard_id: hazardId }, { projection: { _id: 0 } });
+        const hazardEvent = await collection.findOne(
+            { hazard_id: hazardId },
+            { projection: { _id: 0, published: 0, published_at: 0 } },
+        );
 
         if (!hazardEvent) {
             callback({code: grpc.status.NOT_FOUND, message: `Hazard event with hazard_id ${hazardId} not found`});
@@ -147,6 +172,10 @@ async function main () {
     await collection.createIndex({ hazard_id: 1 });
 
     await connectKafka();
+    void runIngestConsumer(ingestHazard).catch((error) => {
+        console.error("Kafka ingestion consumer failed", error);
+        process.exit(1);
+    });
 
 
     const server = new grpc.Server();
@@ -167,6 +196,7 @@ async function main () {
             }
 
             console.log(`gRPC listening on ${port}`);
+            console.log(`Consuming HazardEvents from Kafka topic ${kafka.inTopic}`);
             console.log(`Publishing HazardEvents to Kafka topic ${kafka.outTopic}`);
         }
     );

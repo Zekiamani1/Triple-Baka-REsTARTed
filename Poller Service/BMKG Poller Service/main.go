@@ -12,8 +12,8 @@ import (
 	"bmkg-poller/hazard"
 
 	"github.com/google/uuid"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"github.com/segmentio/kafka-go"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -37,14 +37,26 @@ type TsunamiWarning struct {
 }
 
 func SendToAggregate(thething *hazard.Hazard) {
-	aggregateAddr := "aggregate:50051"
-	conn, err := grpc.NewClient(aggregateAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	payload, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(thething)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("Failed to encode HazardEvent: %v", err)
+		return
 	}
-	defer conn.Close()
-	client := hazard.NewAggregateClient(conn)
-	client.AggregateEvent(context.Background(), thething)
+
+	writer := &kafka.Writer{
+		Addr:     kafka.TCP("kafka-aggregate:29092"),
+		Topic:    "hazard-ingest",
+		Balancer: &kafka.Hash{},
+	}
+	defer writer.Close()
+
+	err = writer.WriteMessages(context.Background(), kafka.Message{
+		Key:   []byte(thething.HazardId),
+		Value: payload,
+	})
+	if err != nil {
+		log.Printf("Failed to publish HazardEvent to Kafka: %v", err)
+	}
 }
 
 type fetchresult[T any] struct {

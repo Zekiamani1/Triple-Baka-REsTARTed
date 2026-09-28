@@ -11,6 +11,8 @@ function required(name: string, fallback?: string): string {
 export const kafka = {
   brokers: required('KAFKA_BROKERS', 'localhost:9092').split(','),
   clientId: required('KAFKA_CLIENT_ID', 'bnpb-aggregate-service'),
+  groupId: required('KAFKA_CONSUMER_GROUP', 'aggregate-ingestion'),
+  inTopic: required('KAFKA_TOPIC_HAZARD_INGEST', 'hazard-ingest'),
   outTopic: required('KAFKA_TOPIC_HAZARD_EVENTS', 'hazard-events'),
 };
  

@@ -45,6 +45,23 @@ services:
       - "1"
       - --replication-factor
       - "1"
+  kafka-init-ingest:
+    image: apache/kafka:latest
+    depends_on:
+      kafka-aggregate:
+        condition: service_healthy
+    command:
+      - /opt/kafka/bin/kafka-topics.sh
+      - --bootstrap-server
+      - kafka-aggregate:29092
+      - --create
+      - --if-not-exists
+      - --topic
+      - hazard-ingest
+      - --partitions
+      - "1"
+      - --replication-factor
+      - "1"
   aggregate:
     build: "./Aggregate Service"
     ports:
@@ -56,11 +73,15 @@ services:
       AGGREGATOR_PORT: 50051
       KAFKA_BROKERS: kafka-aggregate:29092
       KAFKA_CLIENT_ID: aggregate-service
+      KAFKA_CONSUMER_GROUP: aggregate-ingestion
+      KAFKA_TOPIC_HAZARD_INGEST: hazard-ingest
       KAFKA_TOPIC_HAZARD_EVENTS: hazard-events
     depends_on:
       mongo-aggregate:
         condition: service_started
       kafka-init:
+        condition: service_completed_successfully
+      kafka-init-ingest:
         condition: service_completed_successfully
   bmkg:
     build: "./External System/BMKG"
@@ -89,8 +110,8 @@ services:
     depends_on:
       bmkg:
         condition: service_healthy
-      aggregate:
-        condition: service_started
+      kafka-init-ingest:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "kill -0 1"]
       interval: 5s
@@ -102,8 +123,8 @@ services:
     depends_on:
       pvmbg:
         condition: service_healthy
-      aggregate:
-        condition: service_started
+      kafka-init-ingest:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "kill -0 1"]
       interval: 5s
