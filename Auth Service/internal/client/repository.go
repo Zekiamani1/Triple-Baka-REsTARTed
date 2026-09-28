@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+var ErrNotFound = errors.New("client: not found")
+
 type Repository interface {
 	UpsertClient(cont context.Context, cli Client) error
 	GetByID(cont context.Context, ID string) (*Client, error)
@@ -32,7 +34,7 @@ func (this *PostgresRepo) UpsertClient(cont context.Context, cli Client) error {
 	if createdAt.IsZero() {
 		createdAt = time.Now().UTC()
 	}
-	_, err := this.db.ExecContext(cont, query, cli.ClientID, cli.Secret, cli.Scope, cli.DisplayName, cli.CreatedAt)
+	_, err := this.db.ExecContext(cont, query, cli.ClientID, cli.Secret, cli.Scope, cli.DisplayName, createdAt)
 	return err
 }
 
@@ -47,7 +49,7 @@ func (this *PostgresRepo) GetByID(cont context.Context, ID string) (*Client, err
 		&client.ClientID, &client.Secret, &client.Scope, &client.DisplayName, &client.CreatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, errors.New("client: not found")
+		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err

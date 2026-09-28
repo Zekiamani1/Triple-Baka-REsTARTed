@@ -1,0 +1,24 @@
+syntax = "proto3";
+package auth.v1;
+option go_package = "github.com/Zekiamani1/Triple-Baka-REsTARTed/auth-service/gen/auth/v1;authv1";
+
+service AuthService {
+  rpc IssueToken(IssueTokenRequest) returns (TokenResponse);     
+  rpc RefreshToken(RefreshTokenRequest) returns (TokenResponse); 
+  rpc GetJWKS(GetJWKSRequest) returns (GetJWKSResponse);         
+}
+
+message IssueTokenRequest   { string client_id = 1; string client_secret = 2; }
+message RefreshTokenRequest { string refresh_token = 1; }
+message TokenResponse {
+  string access_token  = 1;
+  string refresh_token = 2;
+  int64  expires_in    = 3;
+}
+
+message GetJWKSRequest {}
+message JSONWebKey {
+  string kty = 1; string use = 2; string alg = 3;
+  string kid = 4; string n = 5; string e = 6;
+}
+message GetJWKSResponse { repeated JSONWebKey keys = 1; }
