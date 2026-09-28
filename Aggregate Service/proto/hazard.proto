@@ -1,8 +1,8 @@
 syntax = "proto3";
 
 import "google/protobuf/timestamp.proto";
-import "google/protobuf/any.proto";
 import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
 
 package hazard;
 
@@ -39,7 +39,7 @@ message Hazard {
   double longitude = 8;
   google.protobuf.Timestamp occurred_at = 9;
   google.protobuf.Timestamp ingested_at = 10;
-  map<string, google.protobuf.Any> attributes = 11;
+  google.protobuf.Struct attributes = 11;
 }
 
 message GetHazardRequest {

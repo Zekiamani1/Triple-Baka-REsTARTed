@@ -31,7 +31,7 @@ type VolcanoReport struct {
 }
 
 func SendToAggregate(thething *proto.Hazard) {
-	aggregateAddr := "localhost:50051"
+	aggregateAddr := "aggregate:50051"
 	conn, err := grpc.NewClient(aggregateAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatal(err)
@@ -47,7 +47,7 @@ type fetchresult[T any] struct {
 }
 
 func poll(since time.Time) (reports []VolcanoReport, err error) {
-	pvmbg := "http://localhost:6767"
+	pvmbg := "http://pvmbg:6767"
 
 	targeturl := fmt.Sprintf("%s/volcanic-reports?since=%s", pvmbg, url.QueryEscape(since.Format(time.RFC3339)))
 	resp, err := http.Get(targeturl)
@@ -88,7 +88,7 @@ func normalize(data VolcanoReport) proto.Hazard {
 	return proto.Hazard{
 
 		HazardId:    uuid.NewString(),
-		Source:      proto.Source_BMKG,
+		Source:      proto.Source_PVMBG,
 		SourceRefId: data.ReportID,
 		HazardType:  proto.HazardType_VOLCANIC,
 		Longitude:   0,

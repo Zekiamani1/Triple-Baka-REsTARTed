@@ -62,6 +62,54 @@ services:
         condition: service_started
       kafka-init:
         condition: service_completed_successfully
+  bmkg:
+    build: "./External System/BMKG"
+    ports:
+      - "8081:6767"
+    volumes:
+      - bmkg-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:6767/health >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  pvmbg:
+    build: "./External System/PVMBG"
+    ports:
+      - "8082:6767"
+    volumes:
+      - pvmbg-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:6767/health >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  bmkg-poller:
+    build: "./Poller Service/BMKG Poller Service"
+    depends_on:
+      bmkg:
+        condition: service_healthy
+      aggregate:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+  pvmbg-poller:
+    build: "./Poller Service/PVMBG Poller Service"
+    depends_on:
+      pvmbg:
+        condition: service_healthy
+      aggregate:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
   event-consumer:
     build: "./Event Consumer"
     environment:
@@ -76,3 +124,5 @@ services:
 
 volumes:
   kafka-data:
+  bmkg-data:
+  pvmbg-data:

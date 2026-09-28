@@ -37,7 +37,7 @@ type TsunamiWarning struct {
 }
 
 func SendToAggregate(thething *hazard.Hazard) {
-	aggregateAddr := "localhost:50051"
+	aggregateAddr := "aggregate:50051"
 	conn, err := grpc.NewClient(aggregateAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatal(err)
@@ -54,7 +54,7 @@ type fetchresult[T any] struct {
 
 func fetchSeismicEvent(since time.Time, channel chan fetchresult[[]SeismicEvent]) {
 	var events []SeismicEvent
-	bmkgadress := "http://localhost:6767"
+	bmkgadress := "http://bmkg:6767"
 
 	targeturl := fmt.Sprintf("%s/seismic-events?since=%s", bmkgadress, url.QueryEscape(since.Format(time.RFC3339)))
 	resp, err := http.Get(targeturl)
@@ -75,7 +75,7 @@ func fetchSeismicEvent(since time.Time, channel chan fetchresult[[]SeismicEvent]
 }
 func fetchTsunamiWarning(since time.Time, channel chan fetchresult[[]TsunamiWarning]) {
 	var warnings []TsunamiWarning
-	bmkgadress := "http://localhost:6767"
+	bmkgadress := "http://bmkg:6767"
 
 	targeturl := fmt.Sprintf("%s/tsunami-warnings?since=%s", bmkgadress, url.QueryEscape(since.Format(time.RFC3339)))
 	resp, err := http.Get(targeturl)

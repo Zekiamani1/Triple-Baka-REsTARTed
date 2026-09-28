@@ -165,7 +165,7 @@ func fetcheventbytime(since time.Time) []SeismicEvent {
 		if err != nil {
 			log.Fatal(err)
 		}
-		layout := "2006-01-02 15:04:05+07:00"
+		layout := "2006-01-02 15:04:05.999999999Z07:00"
 
 		seismic.OccurredAt, err = time.Parse(layout, time1)
 		if err != nil {
@@ -204,8 +204,7 @@ func fetchtsunamibytime(since time.Time) []TsunamiWarning {
 		if err != nil {
 			log.Fatal(err)
 		}
-		layout := "2006-01-02 15:04:05+07:00"
-
+layout := "2006-01-02 15:04:05.999999999Z07:00"
 		tsunami.EstimatedArrival, err = time.Parse(layout, time1)
 		if err != nil {
 			log.Fatal(err)
@@ -236,8 +235,7 @@ func fetchalltsunami() []TsunamiWarning {
 		if err != nil {
 			log.Fatal(err)
 		}
-		layout := "2006-01-02 15:04:05+07:00"
-
+layout := "2006-01-02 15:04:05.999999999Z07:00"
 		tsunami.EstimatedArrival, err = time.Parse(layout, time1)
 		if err != nil {
 			log.Fatal(err)
