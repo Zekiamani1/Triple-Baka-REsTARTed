@@ -20,6 +20,7 @@ import (
 	"auth-service/internal/server"
 	"auth-service/internal/token"
 	authv1 "auth-service/proto/auth/v1"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
@@ -222,6 +223,5 @@ func healthHandler(db *sql.DB) http.HandlerFunc {
 		}
 		writer.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(writer).Encode(map[string]string{"status": "ok"})
-		return
 	}
 }
