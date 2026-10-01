@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/Zekiamani1/Triple-Baka-REsTARTed/auth-service/internal/client"
-	"github.com/Zekiamani1/Triple-Baka-REsTARTed/auth-service/internal/server"
+	"auth-service/internal/client"
+	"auth-service/internal/server"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -34,10 +34,13 @@ func main() {
 		},
 	}
 	dsn := getEnv("AUTH_DB_DSN")
-	database := server.ConnectDBWithRetry(dsn, 10, 2*time.Second)
+	database, err := server.ConnectDBWithRetry(cont, dsn, 10, 2*time.Second)
+	if err != nil {
+		log.Fatalf("connecting to db failed: %v", err)
+	}
 	defer database.Close()
 	repo := client.NewPostgresRepo(database)
-	err := client.SeedClients(cont, repo, clients)
+	err = client.SeedClients(cont, repo, clients)
 	if err != nil {
 		log.Fatalf("seed failed: %v", err)
 	}

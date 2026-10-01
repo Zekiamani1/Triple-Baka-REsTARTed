@@ -4,8 +4,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/Zekiamani1/Triple-Baka-REsTARTed/auth-service/internal/client"
-	"github.com/Zekiamani1/Triple-Baka-REsTARTed/auth-service/internal/keys"
+	"auth-service/internal/client"
+	"auth-service/internal/keys"
 	"github.com/golang-jwt/jwt/v5"
 )
 

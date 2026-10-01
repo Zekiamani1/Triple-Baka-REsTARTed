@@ -4,14 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"log"
+	"fmt"
 	"log/slog"
 	"time"
 
-	"github.com/Zekiamani1/Triple-Baka-REsTARTed/auth-service/internal/client"
-	"github.com/Zekiamani1/Triple-Baka-REsTARTed/auth-service/internal/keys"
-	"github.com/Zekiamani1/Triple-Baka-REsTARTed/auth-service/internal/token"
-	"github.com/Zekiamani1/Triple-Baka-REsTARTed/auth-service/proto/auth/v1"
+	"auth-service/internal/client"
+	"auth-service/internal/keys"
+	"auth-service/internal/token"
+	"auth-service/proto/auth/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -43,7 +43,7 @@ func (this *Server) IssueToken(ctx context.Context, request *authv1.IssueTokenRe
 	cli, err := client.AuthenticateClient(ctx, this.deps.ClientRepo, request.ClientId, request.ClientSecret)
 	if err != nil {
 		if errors.Is(err, client.ErrInvalidCredentials) {
-			slog.WarnContext(ctx, "auth failed", "client_id", request.ClientId)
+			slog.ErrorContext(ctx, "auth failed", "client_id", request.ClientId)
 			return nil, errUnauth
 		}
 		slog.ErrorContext(ctx, "authenticate client", "err", err)
@@ -66,8 +66,11 @@ func (this *Server) RefreshToken(ctx context.Context, request *authv1.RefreshTok
 	}
 	cli, err := this.deps.ClientRepo.GetByID(ctx, cliID)
 	if err != nil {
-		slog.WarnContext(ctx, "internal server error", "err", err)
-		return nil, status.Error(codes.Internal, "internal error")
+		if errors.Is(err, client.ErrNotFound) {
+			return nil, errUnauth
+		}
+		slog.ErrorContext(ctx, "fetch client for refresh", "err", err)
+		return nil, errInternal
 	}
 	return this.issuePair(ctx, cli)
 }
@@ -75,17 +78,17 @@ func (this *Server) RefreshToken(ctx context.Context, request *authv1.RefreshTok
 func (this *Server) issuePair(ctx context.Context, cli *client.Client) (*authv1.TokenResponse, error) {
 	accToken, _, err := token.BuildAccessToken(this.deps.Keys, cli, this.deps.AccessTokenTTL)
 	if err != nil {
-		slog.WarnContext(ctx, "internal server error", "err", err)
+		slog.ErrorContext(ctx, "build access token", "err", err)
 		return nil, status.Error(codes.Internal, "internal error")
 	}
 	refreshToken, err := token.GenerateRefreshToken()
 	if err != nil {
-		slog.WarnContext(ctx, "internal server error", "err", err)
+		slog.ErrorContext(ctx, "generate refresh token", "err", err)
 		return nil, status.Error(codes.Internal, "internal error")
 	}
 	err = token.StoreRefreshToken(ctx, this.deps.RefreshRepo, cli.ClientID, token.HashRefreshToken(refreshToken), time.Now().Add(this.deps.RefreshTokenTTL))
 	if err != nil {
-		slog.WarnContext(ctx, "internal server error", "err", err)
+		slog.ErrorContext(ctx, "store refresh token", "err", err)
 		return nil, status.Error(codes.Internal, "internal error")
 	}
 	return &authv1.TokenResponse{AccessToken: accToken, RefreshToken: refreshToken, ExpiresIn: int64(this.deps.AccessTokenTTL.Seconds())}, nil
@@ -101,23 +104,29 @@ func (this *Server) GetJWKS(ctx context.Context, _ *authv1.GetJWKSRequest) (*aut
 	return response, nil
 }
 
-func ConnectDBWithRetry(dsn string, attempts int, delay time.Duration) *sql.DB {
-	var db *sql.DB
-	var err error
-	for i := range attempts {
-		db, err = sql.Open("pgx", dsn)
-		if err != nil {
-			log.Printf("seed: db not ready (attempt %d/%d): %v", i+1, attempts, err)
-			time.Sleep(delay)
-		} else {
-			ping, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			err = db.PingContext(ping)
-			cancel()
-			if err == nil {
-				return db
-			}
+func ConnectDBWithRetry(ctx context.Context, dsn string, attempts int, delay time.Duration) (*sql.DB, error) {
+	conn, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("db: open: %w", err)
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		lastErr = conn.PingContext(pingCtx)
+		cancel()
+		if lastErr == nil {
+			return conn, nil
+		}
+
+		slog.Warn("db: not ready yet", "attempt", attempt, "attempts", attempts, "err", lastErr)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			conn.Close()
+			return nil, ctx.Err()
 		}
 	}
-	log.Fatalf("seed: could not connect to db after %d attempts: %v", attempts, err)
-	return nil
+	conn.Close()
+	return nil, fmt.Errorf("db: unreachable after %d attempts: %w", attempts, lastErr)
 }

@@ -1,4 +1,4 @@
-module github.com/Zekiamani1/Triple-Baka-REsTARTed/auth-service
+module auth-service
 
 go 1.26.0
 
