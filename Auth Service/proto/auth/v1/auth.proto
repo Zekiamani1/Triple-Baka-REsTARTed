@@ -1,6 +1,6 @@
 syntax = "proto3";
 package auth.v1;
-option go_package = "github.com/Zekiamani1/Triple-Baka-REsTARTed/auth-service/gen/auth/v1;authv1";
+option go_package = "auth-service/gen/auth/v1;authv1";
 
 service AuthService {
   rpc IssueToken(IssueTokenRequest) returns (TokenResponse);     
