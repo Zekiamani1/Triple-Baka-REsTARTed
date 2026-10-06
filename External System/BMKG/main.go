@@ -1,0 +1,341 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"time"
+
+	"database/sql"
+
+	_ "github.com/mattn/go-sqlite3"
+
+	"github.com/brianvoe/gofakeit/v7"
+	"github.com/google/uuid"
+)
+
+type SeismicEvent struct {
+	EventID          string    `json:"event_id"`
+	Magnitude        float64   `json:"magnitude"`
+	DepthKM          float64   `json:"depth_km"`
+	EpicenterLat     float64   `json:"epicenter_lat"`
+	EpicenterLon     float64   `json:"epicenter_lon"`
+	RegionName       string    `json:"region_name"`
+	OccurredAt       time.Time `json:"occurred_at"`
+	PotentialTsunami bool      `json:"potential_tsunami"`
+}
+type TsunamiWarning struct {
+	WarningID        string    `json:"warning_id"`
+	RelatedEventID   string    `json:"related_event_id"`
+	ThreatLevel      string    `json:"threat_level"`
+	AffectedZones    string    `json:"affected_zones"`
+	EstimatedArrival time.Time `json:"estimated_arrival"`
+}
+
+func health(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(200)
+	fmt.Fprint(w, "UP")
+}
+func seismicHandler(w http.ResponseWriter, r *http.Request) {
+	since := r.URL.Query().Get("since")
+	if since == "" {
+		event := fetchallevents()
+		body, _ := json.Marshal(event)
+		w.Write(body)
+		return
+	}
+	parsedsince, err := time.Parse(time.RFC3339, since)
+	if err != nil {
+		w.WriteHeader(400)
+		fmt.Fprint(w, err.Error())
+		return
+	}
+	event := fetcheventbytime(parsedsince)
+	body, _ := json.Marshal(event)
+	w.Write(body)
+}
+func tsunamiHandler(w http.ResponseWriter, r *http.Request) {
+	since := r.URL.Query().Get("since")
+	if since == "" {
+		event := fetchalltsunami()
+		body, _ := json.Marshal(event)
+		w.Write(body)
+		return
+	}
+	parsedsince, err := time.Parse(time.RFC3339, since)
+	if err != nil {
+		w.WriteHeader(400)
+		fmt.Fprint(w, err.Error())
+		return
+	}
+	event := fetchtsunamibytime(parsedsince)
+	body, _ := json.Marshal(event)
+	w.Write(body)
+}
+func initdb() {
+	db, err := sql.Open("sqlite3", "./bmkg.db")
+	if err != nil {
+		log.Fatalf("Gagal membuka koneksi database: %v", err)
+	}
+	defer db.Close()
+	sqlStmt := `
+	CREATE TABLE if not exists seismic_event (
+    event_id VARCHAR(50) PRIMARY KEY,
+    magnitude DOUBLE PRECISION NOT NULL,
+    depth_km DOUBLE PRECISION NOT NULL,
+    epicenter_lat DOUBLE PRECISION NOT NULL,
+    epicenter_lon DOUBLE PRECISION NOT NULL,
+    region_name VARCHAR(100) NOT NULL,
+    occurred_at TIMESTAMPTZ NOT NULL,
+    potential_tsunami BOOLEAN NOT NULL);
+	
+	CREATE TABLE if not exists tsunami_warnings (
+    warning_id VARCHAR(50) PRIMARY KEY,
+    related_event_id VARCHAR(50) NOT NULL,
+    threat_level VARCHAR(10) NOT NULL,
+    affected_zones TEXT NOT NULL,
+    estimated_arrival TIMESTAMPTZ NOT NULL,
+
+    CONSTRAINT fk_related_event
+        FOREIGN KEY (related_event_id)
+        REFERENCES seismic_event(event_id));`
+
+	_, err = db.Exec(sqlStmt)
+	if err != nil {
+		log.Printf("%q: %s\n", err, sqlStmt)
+		return
+	}
+}
+func fetchallevents() []SeismicEvent {
+	db, _ := sql.Open("sqlite3", "./bmkg.db")
+	defer db.Close()
+	rows, err := db.Query(`
+	SELECT *
+	FROM seismic_event
+	ORDER BY occurred_at ASC;`)
+	if err != nil {
+		log.Printf(err.Error())
+		return nil
+	}
+	var events []SeismicEvent
+	for rows.Next() {
+		var seismic SeismicEvent
+		var time1 string
+		err = rows.Scan(&seismic.EventID, &seismic.Magnitude,
+			&seismic.DepthKM, &seismic.EpicenterLat, &seismic.EpicenterLon,
+			&seismic.RegionName, &time1, &seismic.PotentialTsunami)
+		if err != nil {
+			log.Fatal(err)
+		}
+		layout := "2006-01-02 15:04:05+07:00"
+		seismic.OccurredAt, err = time.Parse(layout, time1)
+		if err != nil {
+			log.Fatal(err)
+		}
+		events = append(events, seismic)
+	}
+	return events
+}
+func fetcheventbytime(since time.Time) []SeismicEvent {
+	db, _ := sql.Open("sqlite3", "./bmkg.db")
+	defer db.Close()
+	stmt, err := db.Prepare(`
+	SELECT *
+	FROM seismic_event
+	WHERE occurred_at >= ?
+	ORDER BY occurred_at ASC;`)
+	if err != nil {
+		log.Printf(err.Error())
+		return nil
+	}
+
+	rows, err := stmt.Query(since)
+	if err != nil {
+		log.Printf(err.Error())
+		return nil
+	}
+	var events []SeismicEvent
+	for rows.Next() {
+		var seismic SeismicEvent
+		var time1 string
+		err = rows.Scan(&seismic.EventID, &seismic.Magnitude,
+			&seismic.DepthKM, &seismic.EpicenterLat, &seismic.EpicenterLon,
+			&seismic.RegionName, &time1, &seismic.PotentialTsunami)
+		if err != nil {
+			log.Fatal(err)
+		}
+		layout := "2006-01-02 15:04:05.999999999Z07:00"
+
+		seismic.OccurredAt, err = time.Parse(layout, time1)
+		if err != nil {
+			log.Fatal(err)
+		}
+		events = append(events, seismic)
+	}
+	return events
+}
+
+func fetchtsunamibytime(since time.Time) []TsunamiWarning {
+	db, _ := sql.Open("sqlite3", "./bmkg.db")
+	defer db.Close()
+	stmt, err := db.Prepare(`
+	SELECT warning_id, related_event_id, threat_level, affected_zones, estimated_arrival
+	FROM seismic_event as s
+	JOIN tsunami_warnings as ts
+	on ts.related_event_id = s.event_id
+	WHERE s.occurred_at >= ?
+	ORDER BY s.occurred_at ASC;`)
+	if err != nil {
+		log.Printf(err.Error())
+		return nil
+	}
+
+	rows, err := stmt.Query(since)
+	if err != nil {
+		log.Printf(err.Error())
+		return nil
+	}
+	var events []TsunamiWarning
+	for rows.Next() {
+		var tsunami TsunamiWarning
+		var time1 string
+		err = rows.Scan(&tsunami.WarningID, &tsunami.RelatedEventID, &tsunami.ThreatLevel, &tsunami.AffectedZones, &time1)
+		if err != nil {
+			log.Fatal(err)
+		}
+layout := "2006-01-02 15:04:05.999999999Z07:00"
+		tsunami.EstimatedArrival, err = time.Parse(layout, time1)
+		if err != nil {
+			log.Fatal(err)
+		}
+		events = append(events, tsunami)
+	}
+	return events
+}
+
+func fetchalltsunami() []TsunamiWarning {
+	db, _ := sql.Open("sqlite3", "./bmkg.db")
+	defer db.Close()
+	rows, err := db.Query(`
+	SELECT warning_id, related_event_id, threat_level, affected_zones, estimated_arrival
+	FROM seismic_event as s
+	JOIN tsunami_warnings as ts
+	on ts.related_event_id = s.event_id
+	ORDER BY s.occurred_at ASC;`)
+	if err != nil {
+		log.Printf(err.Error())
+		return nil
+	}
+	var events []TsunamiWarning
+	for rows.Next() {
+		var tsunami TsunamiWarning
+		var time1 string
+		err = rows.Scan(&tsunami.WarningID, &tsunami.RelatedEventID, &tsunami.ThreatLevel, &tsunami.AffectedZones, &time1)
+		if err != nil {
+			log.Fatal(err)
+		}
+layout := "2006-01-02 15:04:05.999999999Z07:00"
+		tsunami.EstimatedArrival, err = time.Parse(layout, time1)
+		if err != nil {
+			log.Fatal(err)
+		}
+		events = append(events, tsunami)
+	}
+	return events
+}
+
+func main() {
+	initdb()
+	go func() {
+		for true {
+			time.Sleep(2 * time.Second)
+			GenerateEvent()
+		}
+	}()
+	bmkg := http.NewServeMux()
+	bmkg.HandleFunc("GET /seismic-events", seismicHandler)
+	bmkg.HandleFunc("GET /tsunami-warnings", tsunamiHandler)
+	bmkg.HandleFunc("GET /health", health)
+
+	fmt.Println("Server is running on http://localhost:6767")
+
+	if err := http.ListenAndServe(":6767", bmkg); err != nil {
+		fmt.Printf("Server failed to start: %v\n", err)
+	}
+}
+
+var threatLevels = []string{
+	"Waspada",
+	"Siaga",
+	"Awas",
+}
+
+func GenerateEvent() {
+	id := uuid.New()
+	seismic := SeismicEvent{
+		EventID:          id.String(),
+		Magnitude:        gofakeit.Float64Range(4.0, 8.0),
+		DepthKM:          gofakeit.Float64Range(1.0, 300.0),
+		EpicenterLat:     gofakeit.Latitude(),
+		EpicenterLon:     gofakeit.Longitude(),
+		RegionName:       gofakeit.City(),
+		OccurredAt:       time.Now(),
+		PotentialTsunami: gofakeit.Bool(),
+	}
+	db, _ := sql.Open("sqlite3", "./bmkg.db")
+	defer db.Close()
+
+	stmt, err := db.Prepare(`
+	INSERT INTO seismic_event (
+				event_id,
+				magnitude,
+				depth_km,
+				epicenter_lat,
+				epicenter_lon,
+				region_name,
+				occurred_at,
+				potential_tsunami
+	)VALUES (?,?,?,?,?,?,?,?);`)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stmt.Close()
+	_, err = stmt.Exec(seismic.EventID, seismic.Magnitude,
+		seismic.DepthKM, seismic.EpicenterLat, seismic.EpicenterLon,
+		seismic.RegionName, seismic.OccurredAt, seismic.PotentialTsunami)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if !seismic.PotentialTsunami {
+		return
+	}
+	tsunamiid := uuid.New()
+	tsunami := TsunamiWarning{
+		WarningID:      tsunamiid.String(),
+		RelatedEventID: id.String(),
+		ThreatLevel:    gofakeit.RandomString(threatLevels),
+		AffectedZones:  gofakeit.City(),
+		EstimatedArrival: time.Now().Add(
+			time.Duration(gofakeit.IntRange(10, 180)) * time.Minute,
+		),
+	}
+	stmt2, err := db.Prepare(`
+	INSERT INTO tsunami_warnings (
+		warning_id,
+		related_event_id,
+		threat_level,
+		affected_zones,
+		estimated_arrival
+	) VALUES (?,?,?,?,?);`)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stmt.Close()
+
+	_, err = stmt2.Exec(tsunami.WarningID, tsunami.RelatedEventID, tsunami.ThreatLevel, tsunami.AffectedZones, tsunami.EstimatedArrival)
+	if err != nil {
+		log.Fatal(err)
+	}
+}

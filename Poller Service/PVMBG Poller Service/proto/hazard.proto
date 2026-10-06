@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
+
+
+package hazard;
+option go_package = "./proto";
+
+service Aggregate {
+    rpc aggregateEvent(Hazard) returns (google.protobuf.Empty);
+    rpc GetHazard(GetHazardRequest) returns (Hazard);
+    rpc ListHazards(ListHazardsRequest) returns (ListHazardsResponse);
+}
+enum Source {
+    SOURCE_UNSPECIFIED = 0;
+    BMKG = 1;
+    PVMBG = 2;
+}
+enum HazardType {
+    HAZARD_TYPE_UNSPECIFIED = 0;
+    SEISMIC = 1;
+    VOLCANIC = 2;
+}
+enum Severity {
+    SEVERITY_UNSPECIFIED = 0;
+    NORMAL = 1;
+    WASPADA = 2;
+    SIAGA = 3;
+    AWAS = 4;
+}
+message Hazard {
+  string hazard_id = 1;
+  Source source = 2;
+  string source_ref_id = 3;
+  HazardType hazard_type = 4;
+  Severity severity = 5;
+  string area_name = 6;
+  double latitude = 7;
+  double longitude = 8;
+  google.protobuf.Timestamp occurred_at = 9;
+  google.protobuf.Timestamp ingested_at = 10;
+  google.protobuf.Struct attributes = 11;
+}
+
+message GetHazardRequest {
+    string hazard_id = 1;
+}
+
+message ListHazardsRequest {
+    Source source = 1;
+    HazardType hazard_type = 2;
+    Severity severity = 3;
+    int32 limit = 4;
+    int32 offset = 5;
+}
+
+message ListHazardsResponse {
+  repeated Hazard hazards = 1;
+  int32 total = 2;
+}
