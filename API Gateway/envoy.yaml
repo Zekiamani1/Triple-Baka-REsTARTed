@@ -1,0 +1,80 @@
+static_resources:
+  listeners:
+    - name: rest_listener
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8080 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress_rest
+                codec_type: AUTO
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: backend
+                      domains: ["*"]
+                      cors:
+                        allow_origin_string_match:
+                          - prefix: "*"
+                        allow_methods: GET, POST, OPTIONS
+                        allow_headers: content-type,authorization,x-correlation-id
+                      routes:
+                        - match: { prefix: "/auth/"}
+                          route: { cluster: auth_service }
+                        - match: { prefix: "/.well-known/jwks.json"}
+                          route: { cluster: auth_service }
+                        - match: { prefix: "/aggregate/"}
+                          route: { cluster: aggregator_service }
+                http_filters:
+                  - name: envoy.filters.http.grpc_json_transcoder
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
+                      proto_descriptor: "/etc/envoy/descriptors/auth.pb"
+                      services: ["auth.v1.AuthService"]
+                      print_options:
+                        add_whitespace: true
+                        always_print_primitive_fields: true
+                      request_validation_options:
+                        reject_unknown_method: true
+                        reject_unknown_query_parameters: true
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: auth_service
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: auth_service
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: auth-service, port_value: 8083 }
+
+    - name: aggregator_service
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: aggregator_service
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: aggregator-service, port_value: 9090 }
+
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
