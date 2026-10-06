@@ -142,8 +142,72 @@ services:
       kafka-init:
         condition: service_completed_successfully
     restart: unless-stopped
-
+  auth-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - auth-db-data:/var/lib/postgresql/data
+      - ./auth-service/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+  auth-keygen:
+    build: ./auth-service
+    image: auth-service:dev
+    command: ["./auth-service", "keygen"]
+    env_file: ./auth-service/.env
+    volumes:
+      - auth-keys:/app/keys
+    restart: "no"
+  auth-seed:
+    build: ./auth-service
+    image: auth-service:dev
+    command: ["./seed"]
+    env_file: ./auth-service/.env
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    restart: "no"
+  auth-service:
+    build: ./auth-service
+    image: auth-service:dev
+    container_name: auth-service
+    env_file: ./auth-service/.env
+    depends_on:
+      auth-db:
+        condition: service_healthy
+      auth-seed:
+        condition: service_completed_successfully
+      auth-keygen:
+        condition: service_completed_successfully
+    ports:
+      - "8083:8083"       # gRPC — clients call IssueToken/RefreshToken directly here
+    volumes:
+      - auth-keys:/app/keys:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8084/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  gateway:
+    image: envoyproxy/envoy:v1.31-latest
+    container_name: api-gateway
+    ports:
+      - "8080:8080"   # REST, client-facing
+      - "9901:9901"   # admin/debug UI
+    volumes:
+      - ./gateway/envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ./gateway/descriptors:/etc/envoy/descriptors:ro
+    depends_on:
+      auth-service:
+        condition: service_healthy
 volumes:
   kafka-data:
   bmkg-data:
   pvmbg-data:
+  gateway:
