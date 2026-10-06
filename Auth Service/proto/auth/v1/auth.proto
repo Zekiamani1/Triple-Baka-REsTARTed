@@ -1,11 +1,26 @@
 syntax = "proto3";
 package auth.v1;
+import "google/api/annotations.proto";
 option go_package = "auth-service/gen/auth/v1;authv1";
 
 service AuthService {
-  rpc IssueToken(IssueTokenRequest) returns (TokenResponse);     
-  rpc RefreshToken(RefreshTokenRequest) returns (TokenResponse); 
-  rpc GetJWKS(GetJWKSRequest) returns (GetJWKSResponse);         
+  rpc IssueToken(IssueTokenRequest) returns (TokenResponse){
+    option (google.api.http) = {
+      post: "/auth/token"
+      body: "*"
+    };
+  } 
+  rpc RefreshToken(RefreshTokenRequest) returns (TokenResponse){
+    option (google.api.http) = {
+      post: "/auth/refresh"
+      body: "*"
+    };
+  }
+  rpc GetJWKS(GetJWKSRequest) returns (GetJWKSResponse){
+    option (google.api.http) = {
+      get: "/.well-known/jwks.json"
+    };
+  }        
 }
 
 message IssueTokenRequest   { string client_id = 1; string client_secret = 2; }
