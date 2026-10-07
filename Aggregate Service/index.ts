@@ -37,8 +37,8 @@ function protoToHazard(protoHazard: any) {
         area_name: protoHazard.area_name,
         latitude: protoHazard.latitude,
         longitude: protoHazard.longitude,
-        occurred_at: protoHazard.occurred_at,
-        ingested_at: protoHazard.ingested_at,
+        occurred_at: toDate(protoHazard.occurred_at),
+        ingested_at: toDate(protoHazard.ingested_at),
         attributes: protoHazard.attributes,
     }
 }
@@ -49,6 +49,11 @@ function withoutDeliveryState(document: any): Record<string, unknown> {
 }
 
 async function ingestHazard(hazardEvent: any): Promise<void> {
+    hazardEvent = {
+        ...hazardEvent,
+        occurred_at: toDate(hazardEvent.occurred_at),
+        ingested_at: toDate(hazardEvent.ingested_at),
+    };
     const identity = {
         source: hazardEvent.source,
         source_ref_id: hazardEvent.source_ref_id,
@@ -129,7 +134,12 @@ async function listHazards(call: grpc.ServerUnaryCall<any, any>, callback: grpc.
             collection.countDocuments(filter),
         ]);
 
-        callback(null, { hazards, total });
+        callback(null, {
+            hazards: hazards.map((h: any) => ({
+                ...h,
+                occurred_at: toProtoTimestamp(h.occurred_at),
+                ingested_at: toProtoTimestamp(h.ingested_at),
+            })), total });
     } catch (error) {
         console.error(error);
         callback({code: grpc.status.INTERNAL});
@@ -156,7 +166,11 @@ async function getHazard(call: grpc.ServerUnaryCall<any, any>, callback: grpc.se
             return;
         }
 
-        callback(null, hazardEvent);
+        callback(null, {
+            ...hazardEvent,
+            occurred_at: toProtoTimestamp(hazardEvent.occurred_at),
+            ingested_at: toProtoTimestamp(hazardEvent.ingested_at),
+        });
     } catch (error) {
         console.error(error);
         callback({code: grpc.status.INTERNAL});
@@ -216,3 +230,25 @@ main().catch(async (error) => {
   await mongoClient.close().catch(() => undefined);
   process.exit(1);
 });
+
+// Accepts a Date, ISO string, epoch millis, or an already-proto {seconds, nanos}
+// object, and returns a native JS Date — the one shape we store in Mongo.
+function toDate(value: unknown): Date {
+  if (value instanceof Date) return value;
+  if (value && typeof value === "object" && "seconds" in (value as any)) {
+    const v = value as { seconds: number | string; nanos?: number | string };
+    return new Date(Number(v.seconds) * 1000 + Number(v.nanos ?? 0) / 1e6);
+  }
+  const date = new Date(value as string | number);
+  if (isNaN(date.getTime())) {
+    throw new Error(`Invalid timestamp value: ${JSON.stringify(value)}`);
+  }
+  return date;
+}
+
+// Converts a stored Date back into the {seconds, nanos} shape proto-loader
+// needs to serialize a google.protobuf.Timestamp field on the way out.
+function toProtoTimestamp(date: Date): { seconds: number; nanos: number } {
+  const ms = date.getTime();
+  return { seconds: Math.floor(ms / 1000), nanos: (ms % 1000) * 1e6 };
+}
