@@ -10,12 +10,13 @@ import {
   runIngestConsumer,
 } from "./kafkabridge";
 
-const packageDefinition = protoLoader.loadSync(path.resolve("proto/hazard.proto"), {
+const packageDefinition = protoLoader.loadSync(path.resolve("proto/hazard/hazard.proto"), {
   keepCase: true,
   longs: String,
   enums: String,
   defaults: true,
   oneofs: true,
+  includeDirs: ["proto"],
 });
 
 const proto = grpc.loadPackageDefinition(packageDefinition) as any;

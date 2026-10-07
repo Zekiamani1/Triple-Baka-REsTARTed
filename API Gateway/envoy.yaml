@@ -40,12 +40,11 @@ static_resources:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
                       providers:
                         auth_provider:
-                          issuer: bnpb-auth   # must match AUTH_ISSUER exactly
-                          forward: true       # keep the token on the request so the
-                                              # Aggregator can still read sub/scope itself
+                          issuer: bnpb-auth
+                          forward: true
                           remote_jwks:
                             http_uri:
-                              uri: "http://auth-service:8084/.well-known/jwks.json"
+                              uri: "http://gateway-self/.well-known/jwks.json"
                               cluster: auth_jwks_http
                               timeout: 2s
                             cache_duration: 300s
@@ -55,8 +54,9 @@ static_resources:
                   - name: envoy.filters.http.grpc_json_transcoder
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
-                      proto_descriptor: "/etc/envoy/descriptors/auth.pb"
-                      services: ["auth.v1.AuthService"]
+                      proto_descriptor: "/etc/envoy/descriptors/api.pb"
+                      services: ["auth.v1.AuthService", "hazard.Aggregate"]
+                      match_incoming_request_route: true
                       print_options:
                         add_whitespace: true
                         always_print_primitive_fields: true
@@ -83,7 +83,7 @@ static_resources:
                   address:
                     socket_address: { address: auth-service, port_value: 8083 }
     - name: auth_jwks_http
-      type: STRICT_DNS
+      type: STATIC
       lb_policy: ROUND_ROBIN
       load_assignment:
         cluster_name: auth_jwks_http
@@ -91,7 +91,7 @@ static_resources:
           - lb_endpoints:
               - endpoint:
                   address:
-                    socket_address: { address: auth-service, port_value: 8084 }
+                    socket_address: { address: 127.0.0.1, port_value: 8080 }
     - name: aggregator_service
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
@@ -106,7 +106,7 @@ static_resources:
           - lb_endpoints:
               - endpoint:
                   address:
-                    socket_address: { address: aggregator-service, port_value: 9090 }
+                    socket_address: { address: aggregate, port_value: 50051 }
 
 admin:
   address:
