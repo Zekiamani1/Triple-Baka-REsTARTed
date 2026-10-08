@@ -13,55 +13,22 @@ async function main(): Promise<void> {
   await consumer.connect();
   await consumer.subscribe({
     topic: kafkaConfig.topic,
-    fromBeginning: false,
+    fromBeginning: true,
   });
-
-  console.log(`Kafka consumer connected to ${kafkaConfig.brokers.join(", ")}`);
-  console.log(
-    `Listening to ${kafkaConfig.topic} as group ${kafkaConfig.groupId}`,
-  );
+  console.log(`Listening to ${kafkaConfig.topic} for all events`);
 
   await consumer.run({
-    eachMessage: async ({ topic, partition, message }) => {
-      try {
-        const event = parseHazardMessage(message.value);
-
-        console.log("HazardEvent received", {
-          topic,
-          partition,
-          offset: message.offset,
-          key: message.key?.toString(),
-          event,
-        });
-      } catch (error) {
-        console.error("Rejected Kafka message", {
-          topic,
-          partition,
-          offset: message.offset,
-          error: error instanceof Error ? error.message : error,
-        });
-      }
+    eachMessage: async ({ message }) => {
+      console.log("HAZARD EVENT", parseHazardMessage(message.value));
     },
   });
 }
 
-let shuttingDown = false;
-
-async function shutdown(signal: string): Promise<void> {
-  if (shuttingDown) {
-    return;
-  }
-
-  shuttingDown = true;
-  console.log(`Received ${signal}; disconnecting Kafka consumer`);
+async function shutdown(): Promise<void> {
   await consumer.disconnect();
   process.exit(0);
 }
 
-process.once("SIGINT", () => void shutdown("SIGINT"));
-process.once("SIGTERM", () => void shutdown("SIGTERM"));
-
-main().catch((error) => {
-  console.error("Event Consumer failed", error);
-  process.exit(1);
-});
+process.once("SIGINT", () => void shutdown());
+process.once("SIGTERM", () => void shutdown());
+main().catch(console.error);

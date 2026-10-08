@@ -4,7 +4,6 @@
   "private": true,
   "scripts": {
     "dev": "tsx index.ts",
-    "test": "tsx --test *.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -142,6 +142,17 @@ services:
       kafka-init:
         condition: service_completed_successfully
     restart: unless-stopped
+  alert-consumer:
+    build: "./Alert Consumer"
+    environment:
+      KAFKA_BROKERS: kafka-aggregate:29092
+      KAFKA_CLIENT_ID: alert-consumer
+      KAFKA_CONSUMER_GROUP: emergency-notifier
+      KAFKA_TOPIC_HAZARD_EVENTS: hazard-events
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
   auth-db:
     image: postgres:16-alpine
     environment:
