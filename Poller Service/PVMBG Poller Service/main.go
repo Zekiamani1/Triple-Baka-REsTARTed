@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"time"
 
 	"pvmbgpoll/proto"
@@ -113,10 +115,12 @@ func normalize(data VolcanoReport) proto.Hazard {
 	}
 }
 func main() {
-	sleeptime := 3
+	interval := pollInterval()
 	now := time.Now()
-	for true {
-		time.Sleep(time.Duration(sleeptime) * time.Second)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
 		events, _ := poll(now)
 		now = time.Now()
 		for _, data := range events {
@@ -126,4 +130,16 @@ func main() {
 			}()
 		}
 	}
+}
+
+func pollInterval() time.Duration {
+	seconds := 3
+	if value := os.Getenv("POLL_INTERVAL_SECONDS"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed <= 0 {
+			log.Fatalf("POLL_INTERVAL_SECONDS must be a positive integer, got %q", value)
+		}
+		seconds = parsed
+	}
+	return time.Duration(seconds) * time.Second
 }

@@ -107,6 +107,8 @@ services:
       retries: 20
   bmkg-poller:
     build: "./Poller Service/BMKG Poller Service"
+    environment:
+      POLL_INTERVAL_SECONDS: ${BMKG_POLL_INTERVAL_SECONDS:-3}
     depends_on:
       bmkg:
         condition: service_healthy
@@ -120,6 +122,8 @@ services:
     restart: unless-stopped
   pvmbg-poller:
     build: "./Poller Service/PVMBG Poller Service"
+    environment:
+      POLL_INTERVAL_SECONDS: ${PVMBG_POLL_INTERVAL_SECONDS:-3}
     depends_on:
       pvmbg:
         condition: service_healthy
