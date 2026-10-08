@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/brianvoe/gofakeit/v7"
@@ -50,6 +52,22 @@ type VolcanoReport struct {
 var db *gorm.DB
 var version = 1
 var outage = false
+
+func envOrDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func positiveSecondsFromEnv(name string, fallback int) time.Duration {
+	value := envOrDefault(name, strconv.Itoa(fallback))
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds <= 0 {
+		log.Fatalf("%s must be a positive integer, got %q", name, value)
+	}
+	return time.Duration(seconds) * time.Second
+}
 
 func health(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
@@ -107,7 +125,7 @@ func main() {
 	initdb()
 	go func() {
 		for true {
-			time.Sleep(2 * time.Second)
+			time.Sleep(positiveSecondsFromEnv("PVMBG_EVENT_GENERATION_INTERVAL_SECONDS", 2))
 			GenerateEvent()
 		}
 	}()
@@ -117,16 +135,17 @@ func main() {
 	pvmbg.HandleFunc("POST /admin/schema-version", schemachange)
 	pvmbg.HandleFunc("POST /admin/outage", doOutage)
 
-	fmt.Println("Server is running on http://localhost:6767")
+	listenAddress := envOrDefault("PVMBG_LISTEN_ADDR", ":8082")
+	fmt.Printf("Server is running on http://localhost%s\n", listenAddress)
 	handler := outageMiddleware(&outage, pvmbg)
 
-	if err := http.ListenAndServe(":6767", handler); err != nil {
+	if err := http.ListenAndServe(listenAddress, handler); err != nil {
 		fmt.Printf("Server failed to start: %v\n", err)
 	}
 }
 
 func initdb() {
-	db, _ = gorm.Open(sqlite.Open("app.db"), &gorm.Config{})
+	db, _ = gorm.Open(sqlite.Open(envOrDefault("PVMBG_DB_PATH", "app.db")), &gorm.Config{})
 
 	db.AutoMigrate(&VolcanoReport{})
 }

@@ -38,6 +38,13 @@ type TsunamiWarning struct {
 	EstimatedArrival time.Time `json:"estimated_arrival"`
 }
 
+func envOrDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
 func SendToAggregate(thething *hazard.Hazard) {
 	payload, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(thething)
 	if err != nil {
@@ -46,8 +53,8 @@ func SendToAggregate(thething *hazard.Hazard) {
 	}
 
 	writer := &kafka.Writer{
-		Addr:     kafka.TCP("kafka-aggregate:29092"),
-		Topic:    "hazard-ingest",
+		Addr:     kafka.TCP(envOrDefault("KAFKA_BROKERS", "kafka-aggregate:29092")),
+		Topic:    envOrDefault("KAFKA_TOPIC_HAZARD_INGEST", "hazard-ingest"),
 		Balancer: &kafka.Hash{},
 	}
 	defer writer.Close()
@@ -68,7 +75,7 @@ type fetchresult[T any] struct {
 
 func fetchSeismicEvent(since time.Time, channel chan fetchresult[[]SeismicEvent]) {
 	var events []SeismicEvent
-	bmkgadress := "http://bmkg:6767"
+	bmkgadress := envOrDefault("BMKG_BASE_URL", "http://bmkg:8081")
 
 	targeturl := fmt.Sprintf("%s/seismic-events?since=%s", bmkgadress, url.QueryEscape(since.Format(time.RFC3339)))
 	resp, err := http.Get(targeturl)
@@ -89,7 +96,7 @@ func fetchSeismicEvent(since time.Time, channel chan fetchresult[[]SeismicEvent]
 }
 func fetchTsunamiWarning(since time.Time, channel chan fetchresult[[]TsunamiWarning]) {
 	var warnings []TsunamiWarning
-	bmkgadress := "http://bmkg:6767"
+	bmkgadress := envOrDefault("BMKG_BASE_URL", "http://bmkg:8081")
 
 	targeturl := fmt.Sprintf("%s/tsunami-warnings?since=%s", bmkgadress, url.QueryEscape(since.Format(time.RFC3339)))
 	resp, err := http.Get(targeturl)

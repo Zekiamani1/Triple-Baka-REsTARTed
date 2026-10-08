@@ -86,29 +86,30 @@ services:
   bmkg:
     build: "./External System/BMKG"
     ports:
-      - "8081:6767"
+      - "8081:8081"
+    env_file: "./External System/BMKG/.env"
     volumes:
       - bmkg-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:6767/health >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1$${BMKG_LISTEN_ADDR}/health >/dev/null 2>&1"]
       interval: 5s
       timeout: 3s
       retries: 20
   pvmbg:
     build: "./External System/PVMBG"
     ports:
-      - "8082:6767"
+      - "8082:8082"
+    env_file: "./External System/PVMBG/.env"
     volumes:
       - pvmbg-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:6767/health >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1$${PVMBG_LISTEN_ADDR}/health >/dev/null 2>&1"]
       interval: 5s
       timeout: 3s
       retries: 20
   bmkg-poller:
     build: "./Poller Service/BMKG Poller Service"
-    environment:
-      POLL_INTERVAL_SECONDS: ${BMKG_POLL_INTERVAL_SECONDS:-3}
+    env_file: "./Poller Service/BMKG Poller Service/.env"
     depends_on:
       bmkg:
         condition: service_healthy
@@ -122,8 +123,7 @@ services:
     restart: unless-stopped
   pvmbg-poller:
     build: "./Poller Service/PVMBG Poller Service"
-    environment:
-      POLL_INTERVAL_SECONDS: ${PVMBG_POLL_INTERVAL_SECONDS:-3}
+    env_file: "./Poller Service/PVMBG Poller Service/.env"
     depends_on:
       pvmbg:
         condition: service_healthy

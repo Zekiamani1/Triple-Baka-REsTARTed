@@ -32,6 +32,13 @@ type VolcanoReport struct {
 	Extra            map[string]any `json:",embed"`
 }
 
+func envOrDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
 func SendToAggregate(thething *proto.Hazard) {
 	payload, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(thething)
 	if err != nil {
@@ -40,8 +47,8 @@ func SendToAggregate(thething *proto.Hazard) {
 	}
 
 	writer := &kafka.Writer{
-		Addr:     kafka.TCP("kafka-aggregate:29092"),
-		Topic:    "hazard-ingest",
+		Addr:     kafka.TCP(envOrDefault("KAFKA_BROKERS", "kafka-aggregate:29092")),
+		Topic:    envOrDefault("KAFKA_TOPIC_HAZARD_INGEST", "hazard-ingest"),
 		Balancer: &kafka.Hash{},
 	}
 	defer writer.Close()
@@ -61,7 +68,7 @@ type fetchresult[T any] struct {
 }
 
 func poll(since time.Time) (reports []VolcanoReport, err error) {
-	pvmbg := "http://pvmbg:6767"
+	pvmbg := envOrDefault("PVMBG_BASE_URL", "http://pvmbg:8082")
 
 	targeturl := fmt.Sprintf("%s/volcanic-reports?since=%s", pvmbg, url.QueryEscape(since.Format(time.RFC3339)))
 	resp, err := http.Get(targeturl)

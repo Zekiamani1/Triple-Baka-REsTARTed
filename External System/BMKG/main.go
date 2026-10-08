@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"database/sql"
@@ -14,6 +16,26 @@ import (
 	"github.com/brianvoe/gofakeit/v7"
 	"github.com/google/uuid"
 )
+
+func envOrDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func positiveSecondsFromEnv(name string, fallback int) time.Duration {
+	value := envOrDefault(name, strconv.Itoa(fallback))
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds <= 0 {
+		log.Fatalf("%s must be a positive integer, got %q", name, value)
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func databasePath() string {
+	return envOrDefault("BMKG_DB_PATH", "./bmkg.db")
+}
 
 type SeismicEvent struct {
 	EventID          string    `json:"event_id"`
@@ -74,7 +96,7 @@ func tsunamiHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 func initdb() {
-	db, err := sql.Open("sqlite3", "./bmkg.db")
+	db, err := sql.Open("sqlite3", databasePath())
 	if err != nil {
 		log.Fatalf("Gagal membuka koneksi database: %v", err)
 	}
@@ -108,7 +130,7 @@ func initdb() {
 	}
 }
 func fetchallevents() []SeismicEvent {
-	db, _ := sql.Open("sqlite3", "./bmkg.db")
+	db, _ := sql.Open("sqlite3", databasePath())
 	defer db.Close()
 	rows, err := db.Query(`
 	SELECT *
@@ -138,7 +160,7 @@ func fetchallevents() []SeismicEvent {
 	return events
 }
 func fetcheventbytime(since time.Time) []SeismicEvent {
-	db, _ := sql.Open("sqlite3", "./bmkg.db")
+	db, _ := sql.Open("sqlite3", databasePath())
 	defer db.Close()
 	stmt, err := db.Prepare(`
 	SELECT *
@@ -177,7 +199,7 @@ func fetcheventbytime(since time.Time) []SeismicEvent {
 }
 
 func fetchtsunamibytime(since time.Time) []TsunamiWarning {
-	db, _ := sql.Open("sqlite3", "./bmkg.db")
+	db, _ := sql.Open("sqlite3", databasePath())
 	defer db.Close()
 	stmt, err := db.Prepare(`
 	SELECT warning_id, related_event_id, threat_level, affected_zones, estimated_arrival
@@ -204,7 +226,7 @@ func fetchtsunamibytime(since time.Time) []TsunamiWarning {
 		if err != nil {
 			log.Fatal(err)
 		}
-layout := "2006-01-02 15:04:05.999999999Z07:00"
+		layout := "2006-01-02 15:04:05.999999999Z07:00"
 		tsunami.EstimatedArrival, err = time.Parse(layout, time1)
 		if err != nil {
 			log.Fatal(err)
@@ -215,7 +237,7 @@ layout := "2006-01-02 15:04:05.999999999Z07:00"
 }
 
 func fetchalltsunami() []TsunamiWarning {
-	db, _ := sql.Open("sqlite3", "./bmkg.db")
+	db, _ := sql.Open("sqlite3", databasePath())
 	defer db.Close()
 	rows, err := db.Query(`
 	SELECT warning_id, related_event_id, threat_level, affected_zones, estimated_arrival
@@ -235,7 +257,7 @@ func fetchalltsunami() []TsunamiWarning {
 		if err != nil {
 			log.Fatal(err)
 		}
-layout := "2006-01-02 15:04:05.999999999Z07:00"
+		layout := "2006-01-02 15:04:05.999999999Z07:00"
 		tsunami.EstimatedArrival, err = time.Parse(layout, time1)
 		if err != nil {
 			log.Fatal(err)
@@ -249,7 +271,7 @@ func main() {
 	initdb()
 	go func() {
 		for true {
-			time.Sleep(2 * time.Second)
+			time.Sleep(positiveSecondsFromEnv("BMKG_EVENT_GENERATION_INTERVAL_SECONDS", 2))
 			GenerateEvent()
 		}
 	}()
@@ -258,9 +280,10 @@ func main() {
 	bmkg.HandleFunc("GET /tsunami-warnings", tsunamiHandler)
 	bmkg.HandleFunc("GET /health", health)
 
-	fmt.Println("Server is running on http://localhost:6767")
+	listenAddress := envOrDefault("BMKG_LISTEN_ADDR", ":8081")
+	fmt.Printf("Server is running on http://localhost%s\n", listenAddress)
 
-	if err := http.ListenAndServe(":6767", bmkg); err != nil {
+	if err := http.ListenAndServe(listenAddress, bmkg); err != nil {
 		fmt.Printf("Server failed to start: %v\n", err)
 	}
 }
@@ -283,7 +306,7 @@ func GenerateEvent() {
 		OccurredAt:       time.Now(),
 		PotentialTsunami: gofakeit.Bool(),
 	}
-	db, _ := sql.Open("sqlite3", "./bmkg.db")
+	db, _ := sql.Open("sqlite3", databasePath())
 	defer db.Close()
 
 	stmt, err := db.Prepare(`
