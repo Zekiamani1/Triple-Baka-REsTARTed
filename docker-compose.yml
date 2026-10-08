@@ -203,6 +203,7 @@ services:
     volumes:
       - ./API Gateway/envoy.yaml:/etc/envoy/envoy.yaml:ro
       - ./API Gateway/descriptors:/etc/envoy/descriptors:ro
+      - ./API Gateway/lua:/etc/envoy/lua:ro
     depends_on:
       auth-service:
         condition: service_healthy

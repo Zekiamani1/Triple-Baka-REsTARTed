@@ -42,6 +42,10 @@ static_resources:
                         auth_provider:
                           issuer: bnpb-auth
                           forward: true
+                          payload_in_metadata: jwt_payload
+                          claim_to_headers:
+                            - header_name: x-client-scope
+                              claim_name: scope
                           remote_jwks:
                             http_uri:
                               uri: "http://gateway-self/.well-known/jwks.json"
@@ -51,6 +55,11 @@ static_resources:
                       requirement_map:
                         auth_provider:
                           provider_name: auth_provider
+                  - name: envoy.filters.http.lua
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                      default_source_code:
+                        filename: "/etc/envoy/lua/field_filter.lua"
                   - name: envoy.filters.http.grpc_json_transcoder
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder

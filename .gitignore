@@ -29,3 +29,6 @@ coverage/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Debugging
+/*.sh
