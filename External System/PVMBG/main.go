@@ -1,12 +1,14 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/brianvoe/gofakeit/v7"
@@ -67,6 +69,37 @@ func positiveSecondsFromEnv(name string, fallback int) time.Duration {
 		log.Fatalf("%s must be a positive integer, got %q", name, value)
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func requireEnv(name string) string {
+	value := os.Getenv(name)
+	if value == "" {
+		log.Fatalf("%s must be configured", name)
+	}
+	return value
+}
+
+func apiKeyMiddleware(next http.Handler) http.Handler {
+	expectedKey := requireEnv("PVMBG_API_KEY")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		const prefix = "Bearer "
+		authorization := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authorization, prefix) {
+			http.Error(w, "missing bearer API key", http.StatusUnauthorized)
+			return
+		}
+		providedKey := strings.TrimPrefix(authorization, prefix)
+		if subtle.ConstantTimeCompare([]byte(providedKey), []byte(expectedKey)) != 1 {
+			http.Error(w, "invalid PVMBG credentials", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func health(w http.ResponseWriter, r *http.Request) {
@@ -137,7 +170,7 @@ func main() {
 
 	listenAddress := envOrDefault("PVMBG_LISTEN_ADDR", ":8082")
 	fmt.Printf("Server is running on http://localhost%s\n", listenAddress)
-	handler := outageMiddleware(&outage, pvmbg)
+	handler := outageMiddleware(&outage, apiKeyMiddleware(pvmbg))
 
 	if err := http.ListenAndServe(listenAddress, handler); err != nil {
 		fmt.Printf("Server failed to start: %v\n", err)

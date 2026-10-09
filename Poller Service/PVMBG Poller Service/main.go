@@ -39,6 +39,23 @@ func envOrDefault(name, fallback string) string {
 	return fallback
 }
 
+func requiredEnv(name string) string {
+	value := os.Getenv(name)
+	if value == "" {
+		log.Fatalf("%s must be configured", name)
+	}
+	return value
+}
+
+func pvmbgRequest(targetURL string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+requiredEnv("PVMBG_API_KEY"))
+	return http.DefaultClient.Do(req)
+}
+
 func SendToAggregate(thething *proto.Hazard) {
 	payload, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(thething)
 	if err != nil {
@@ -71,13 +88,16 @@ func poll(since time.Time) (reports []VolcanoReport, err error) {
 	pvmbg := envOrDefault("PVMBG_BASE_URL", "http://pvmbg:8082")
 
 	targeturl := fmt.Sprintf("%s/volcanic-reports?since=%s", pvmbg, url.QueryEscape(since.Format(time.RFC3339)))
-	resp, err := http.Get(targeturl)
+	resp, err := pvmbgRequest(targeturl)
 
 	if err != nil {
 		log.Print(err.Error())
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("PVMBG returned HTTP %d", resp.StatusCode)
+	}
 	a, err := io.ReadAll(resp.Body)
 	println(string(a))
 

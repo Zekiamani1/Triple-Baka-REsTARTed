@@ -45,6 +45,23 @@ func envOrDefault(name, fallback string) string {
 	return fallback
 }
 
+func requiredEnv(name string) string {
+	value := os.Getenv(name)
+	if value == "" {
+		log.Fatalf("%s must be configured", name)
+	}
+	return value
+}
+
+func bmkgRequest(targetURL string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-BMKG-Key", requiredEnv("BMKG_API_KEY"))
+	return http.DefaultClient.Do(req)
+}
+
 func SendToAggregate(thething *hazard.Hazard) {
 	payload, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(thething)
 	if err != nil {
@@ -78,7 +95,7 @@ func fetchSeismicEvent(since time.Time, channel chan fetchresult[[]SeismicEvent]
 	bmkgadress := envOrDefault("BMKG_BASE_URL", "http://bmkg:8081")
 
 	targeturl := fmt.Sprintf("%s/seismic-events?since=%s", bmkgadress, url.QueryEscape(since.Format(time.RFC3339)))
-	resp, err := http.Get(targeturl)
+	resp, err := bmkgRequest(targeturl)
 
 	if err != nil {
 		log.Print(err.Error())
@@ -86,6 +103,11 @@ func fetchSeismicEvent(since time.Time, channel chan fetchresult[[]SeismicEvent]
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		err := fmt.Errorf("BMKG returned HTTP %d", resp.StatusCode)
+		channel <- fetchresult[[]SeismicEvent]{err: err, result: nil}
+		return
+	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
 		log.Printf("Error decoding JSON: %v", err)
@@ -99,13 +121,18 @@ func fetchTsunamiWarning(since time.Time, channel chan fetchresult[[]TsunamiWarn
 	bmkgadress := envOrDefault("BMKG_BASE_URL", "http://bmkg:8081")
 
 	targeturl := fmt.Sprintf("%s/tsunami-warnings?since=%s", bmkgadress, url.QueryEscape(since.Format(time.RFC3339)))
-	resp, err := http.Get(targeturl)
+	resp, err := bmkgRequest(targeturl)
 	if err != nil {
 		log.Print(err.Error())
 		channel <- fetchresult[[]TsunamiWarning]{err: err, result: nil}
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		err := fmt.Errorf("BMKG returned HTTP %d", resp.StatusCode)
+		channel <- fetchresult[[]TsunamiWarning]{err: err, result: nil}
+		return
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&warnings); err != nil {
 		log.Printf("Error decoding JSON: %v", err)
 		channel <- fetchresult[[]TsunamiWarning]{err: err, result: nil}

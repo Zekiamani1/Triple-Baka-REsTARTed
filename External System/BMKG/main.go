@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -35,6 +36,35 @@ func positiveSecondsFromEnv(name string, fallback int) time.Duration {
 
 func databasePath() string {
 	return envOrDefault("BMKG_DB_PATH", "./bmkg.db")
+}
+
+func requireEnv(name string) string {
+	value := os.Getenv(name)
+	if value == "" {
+		log.Fatalf("%s must be configured", name)
+	}
+	return value
+}
+
+func apiKeyMiddleware(next http.Handler) http.Handler {
+	expectedKey := requireEnv("BMKG_API_KEY")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		providedKey := r.Header.Get("X-BMKG-Key")
+		if providedKey == "" {
+			http.Error(w, "missing X-BMKG-Key", http.StatusUnauthorized)
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(providedKey), []byte(expectedKey)) != 1 {
+			http.Error(w, "invalid BMKG credentials", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 type SeismicEvent struct {
@@ -283,7 +313,7 @@ func main() {
 	listenAddress := envOrDefault("BMKG_LISTEN_ADDR", ":8081")
 	fmt.Printf("Server is running on http://localhost%s\n", listenAddress)
 
-	if err := http.ListenAndServe(listenAddress, bmkg); err != nil {
+	if err := http.ListenAndServe(listenAddress, apiKeyMiddleware(bmkg)); err != nil {
 		fmt.Printf("Server failed to start: %v\n", err)
 	}
 }
