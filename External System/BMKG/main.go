@@ -150,6 +150,21 @@ func initdb() {
 	}
 }
 
+// SQLite may return timestamps with a space separator and either fractional or
+// whole seconds. Z07:00 is a timezone placeholder; +07:00 would be literal.
+func parseDatabaseTimestamp(value string) (time.Time, error) {
+	for _, layout := range []string{
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05Z07:00",
+		time.RFC3339Nano,
+	} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unsupported database timestamp %q", value)
+}
+
 func runMigrations(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)`); err != nil {
 		return err
@@ -209,12 +224,13 @@ func fetchallevents() []SeismicEvent {
 			&seismic.DepthKM, &seismic.EpicenterLat, &seismic.EpicenterLon,
 			&seismic.RegionName, &time1, &seismic.PotentialTsunami)
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("scan seismic event: %v", err)
+			return nil
 		}
-		layout := "2006-01-02 15:04:05+07:00"
-		seismic.OccurredAt, err = time.Parse(layout, time1)
+		seismic.OccurredAt, err = parseDatabaseTimestamp(time1)
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("parse seismic event time: %v", err)
+			return nil
 		}
 		events = append(events, seismic)
 	}
@@ -246,13 +262,13 @@ func fetcheventbytime(since time.Time) []SeismicEvent {
 			&seismic.DepthKM, &seismic.EpicenterLat, &seismic.EpicenterLon,
 			&seismic.RegionName, &time1, &seismic.PotentialTsunami)
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("scan seismic event: %v", err)
+			return nil
 		}
-		layout := "2006-01-02 15:04:05.999999999Z07:00"
-
-		seismic.OccurredAt, err = time.Parse(layout, time1)
+		seismic.OccurredAt, err = parseDatabaseTimestamp(time1)
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("parse seismic event time: %v", err)
+			return nil
 		}
 		events = append(events, seismic)
 	}
@@ -285,12 +301,13 @@ func fetchtsunamibytime(since time.Time) []TsunamiWarning {
 		var time1 string
 		err = rows.Scan(&tsunami.WarningID, &tsunami.RelatedEventID, &tsunami.ThreatLevel, &tsunami.AffectedZones, &time1)
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("scan tsunami warning: %v", err)
+			return nil
 		}
-		layout := "2006-01-02 15:04:05.999999999Z07:00"
-		tsunami.EstimatedArrival, err = time.Parse(layout, time1)
+		tsunami.EstimatedArrival, err = parseDatabaseTimestamp(time1)
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("parse tsunami warning time: %v", err)
+			return nil
 		}
 		events = append(events, tsunami)
 	}
@@ -316,12 +333,13 @@ func fetchalltsunami() []TsunamiWarning {
 		var time1 string
 		err = rows.Scan(&tsunami.WarningID, &tsunami.RelatedEventID, &tsunami.ThreatLevel, &tsunami.AffectedZones, &time1)
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("scan tsunami warning: %v", err)
+			return nil
 		}
-		layout := "2006-01-02 15:04:05.999999999Z07:00"
-		tsunami.EstimatedArrival, err = time.Parse(layout, time1)
+		tsunami.EstimatedArrival, err = parseDatabaseTimestamp(time1)
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("parse tsunami warning time: %v", err)
+			return nil
 		}
 		events = append(events, tsunami)
 	}
@@ -333,7 +351,9 @@ func main() {
 	go func() {
 		for true {
 			time.Sleep(positiveSecondsFromEnv("BMKG_EVENT_GENERATION_INTERVAL_SECONDS", 2))
-			GenerateEvent()
+			if err := GenerateEvent(); err != nil {
+				log.Printf("generate BMKG event: %v", err)
+			}
 		}
 	}()
 	bmkg := http.NewServeMux()
@@ -355,11 +375,11 @@ var threatLevels = []string{
 	"Awas",
 }
 
-func GenerateEvent() {
-	generateEventAt(time.Now())
+func GenerateEvent() error {
+	return generateEventAt(time.Now())
 }
 
-func generateEventAt(occurredAt time.Time) {
+func generateEventAt(occurredAt time.Time) error {
 	id := uuid.New()
 	seismic := SeismicEvent{
 		EventID:          id.String(),
@@ -386,18 +406,18 @@ func generateEventAt(occurredAt time.Time) {
 				potential_tsunami
 	)VALUES (?,?,?,?,?,?,?,?);`)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("prepare seismic insert: %w", err)
 	}
 	defer stmt.Close()
 	_, err = stmt.Exec(seismic.EventID, seismic.Magnitude,
 		seismic.DepthKM, seismic.EpicenterLat, seismic.EpicenterLon,
 		seismic.RegionName, seismic.OccurredAt, seismic.PotentialTsunami)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("insert seismic event: %w", err)
 	}
 
 	if !seismic.PotentialTsunami {
-		return
+		return nil
 	}
 	tsunamiid := uuid.New()
 	tsunami := TsunamiWarning{
@@ -418,12 +438,13 @@ func generateEventAt(occurredAt time.Time) {
 		estimated_arrival
 	) VALUES (?,?,?,?,?);`)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("prepare tsunami insert: %w", err)
 	}
 	defer stmt2.Close()
 
 	_, err = stmt2.Exec(tsunami.WarningID, tsunami.RelatedEventID, tsunami.ThreatLevel, tsunami.AffectedZones, tsunami.EstimatedArrival)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("insert tsunami warning: %w", err)
 	}
+	return nil
 }

@@ -146,7 +146,9 @@ func VolcanoReportHandler(w http.ResponseWriter, r *http.Request) {
 		result := db.Find(&reports)
 
 		if result.Error != nil {
-			log.Fatal(result.Error)
+			log.Printf("query volcanic reports: %v", result.Error)
+			http.Error(w, "temporary database error", http.StatusInternalServerError)
+			return
 		}
 		body, _ := json.Marshal(reports)
 		w.Write(body)
@@ -162,7 +164,9 @@ func VolcanoReportHandler(w http.ResponseWriter, r *http.Request) {
 	result := db.Where("reported_at >= ?", parsedsince).Find(&reports)
 
 	if result.Error != nil {
-		log.Fatal(result.Error)
+		log.Printf("query volcanic reports since %s: %v", parsedsince.Format(time.RFC3339), result.Error)
+		http.Error(w, "temporary database error", http.StatusInternalServerError)
+		return
 	}
 	body, _ := json.Marshal(reports)
 	w.Write(body)
@@ -186,7 +190,9 @@ func main() {
 	go func() {
 		for true {
 			time.Sleep(positiveSecondsFromEnv("PVMBG_EVENT_GENERATION_INTERVAL_SECONDS", 2))
-			GenerateEvent()
+			if err := GenerateEvent(); err != nil {
+				log.Printf("generate PVMBG event: %v", err)
+			}
 		}
 	}()
 	pvmbg := http.NewServeMux()
@@ -263,11 +269,11 @@ func runMigrations(db *sql.DB) error {
 	}
 	return nil
 }
-func GenerateEvent() {
-	generateEventAt(time.Now())
+func GenerateEvent() error {
+	return generateEventAt(time.Now())
 }
 
-func generateEventAt(reportedAt time.Time) {
+func generateEventAt(reportedAt time.Time) error {
 	id := uuid.New()
 	report := VolcanoReport{}
 	gofakeit.Struct(&report)
@@ -280,6 +286,7 @@ func generateEventAt(reportedAt time.Time) {
 	result := db.Create(&report)
 
 	if result.Error != nil {
-		log.Fatal(result.Error)
+		return result.Error
 	}
+	return nil
 }

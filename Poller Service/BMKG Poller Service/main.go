@@ -81,11 +81,10 @@ func startHealthServer() {
 	}()
 }
 
-func SendToAggregate(thething *hazard.Hazard) {
+func SendToAggregate(thething *hazard.Hazard) error {
 	payload, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(thething)
 	if err != nil {
-		log.Printf("Failed to encode HazardEvent: %v", err)
-		return
+		return fmt.Errorf("encode HazardEvent: %w", err)
 	}
 
 	writer := &kafka.Writer{
@@ -100,8 +99,9 @@ func SendToAggregate(thething *hazard.Hazard) {
 		Value: payload,
 	})
 	if err != nil {
-		log.Printf("Failed to publish HazardEvent to Kafka: %v", err)
+		return fmt.Errorf("publish HazardEvent to Kafka: %w", err)
 	}
+	return nil
 }
 
 type fetchresult[T any] struct {
@@ -241,13 +241,22 @@ func main() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		events, warnings, _ := poll(now)
-		now = time.Now()
+		events, warnings, err := poll(now)
+		if err != nil {
+			log.Printf("BMKG poll failed; keeping cursor %s: %v", now.Format(time.RFC3339), err)
+			continue
+		}
+		published := true
 		for _, data := range events {
-			go func() {
-				normalized := normalize(data, warnings)
-				SendToAggregate(&normalized)
-			}()
+			normalized := normalize(data, warnings)
+			if err := SendToAggregate(&normalized); err != nil {
+				log.Printf("BMKG publish failed; keeping cursor %s: %v", now.Format(time.RFC3339), err)
+				published = false
+				break
+			}
+		}
+		if published {
+			now = time.Now()
 		}
 	}
 }
