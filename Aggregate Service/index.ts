@@ -66,6 +66,7 @@ async function ingestHazard(hazardEvent: any): Promise<void> {
         ...hazardEvent,
         occurred_at: toDate(hazardEvent.occurred_at),
         ingested_at: toDate(hazardEvent.ingested_at),
+        attributes: toStruct(hazardEvent.attributes),
     };
     const identity = {
         source: hazardEvent.source,
@@ -158,6 +159,7 @@ async function listHazards(call: grpc.ServerUnaryCall<any, any>, callback: grpc.
                 ...h,
                 occurred_at: toProtoTimestamp(h.occurred_at),
                 ingested_at: toProtoTimestamp(h.ingested_at),
+                attributes: toStruct(h.attributes),
             })), total });
     } catch (error) {
         console.error(error);
@@ -189,6 +191,7 @@ async function getHazard(call: grpc.ServerUnaryCall<any, any>, callback: grpc.se
             ...hazardEvent,
             occurred_at: toProtoTimestamp(hazardEvent.occurred_at),
             ingested_at: toProtoTimestamp(hazardEvent.ingested_at),
+            attributes: toStruct(hazardEvent.attributes),
         });
     } catch (error) {
         console.error(error);
@@ -277,4 +280,42 @@ function toDate(value: unknown): Date {
 function toProtoTimestamp(date: Date): { seconds: number; nanos: number } {
   const ms = date.getTime();
   return { seconds: Math.floor(ms / 1000), nanos: (ms % 1000) * 1e6 };
+}
+
+// plain JS -> protobuf Struct (for responses)
+function toProtoValue(v: unknown): any {
+  if (v === null || v === undefined) return { nullValue: "NULL_VALUE" };
+  if (v instanceof Date) return { stringValue: v.toISOString() };
+  if (typeof v === "number") return { numberValue: v };
+  if (typeof v === "string") return { stringValue: v };
+  if (typeof v === "boolean") return { boolValue: v };
+  if (Array.isArray(v)) return { listValue: { values: v.map(toProtoValue) } };
+  if (typeof v === "object") return { structValue: toStruct(v as Record<string, unknown>) };
+  return { stringValue: String(v) };
+}
+
+function toStruct(obj: Record<string, unknown> | undefined): any {
+  return {
+    fields: Object.fromEntries(
+      Object.entries(obj ?? {}).map(([k, v]) => [k, toProtoValue(v)]),
+    ),
+  };
+}
+
+// protobuf Struct -> plain JS (for requests)
+function fromProtoValue(v: any): unknown {
+  switch (v?.kind) {
+    case "numberValue": return v.numberValue;
+    case "stringValue": return v.stringValue;
+    case "boolValue": return v.boolValue;
+    case "structValue": return fromStruct(v.structValue);
+    case "listValue": return (v.listValue?.values ?? []).map(fromProtoValue);
+    default: return null;
+  }
+}
+
+function fromStruct(s: any): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(s?.fields ?? {}).map(([k, v]) => [k, fromProtoValue(v)]),
+  );
 }
