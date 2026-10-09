@@ -2,8 +2,10 @@ package main
 
 import (
 	"crypto/subtle"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -17,6 +19,8 @@ import (
 	"github.com/brianvoe/gofakeit/v7"
 	"github.com/google/uuid"
 )
+
+var migrationFiles embed.FS
 
 func envOrDefault(name, fallback string) string {
 	if value := os.Getenv(name); value != "" {
@@ -131,33 +135,50 @@ func initdb() {
 		log.Fatalf("Gagal membuka koneksi database: %v", err)
 	}
 	defer db.Close()
-	sqlStmt := `
-	CREATE TABLE if not exists seismic_event (
-    event_id VARCHAR(50) PRIMARY KEY,
-    magnitude DOUBLE PRECISION NOT NULL,
-    depth_km DOUBLE PRECISION NOT NULL,
-    epicenter_lat DOUBLE PRECISION NOT NULL,
-    epicenter_lon DOUBLE PRECISION NOT NULL,
-    region_name VARCHAR(100) NOT NULL,
-    occurred_at TIMESTAMPTZ NOT NULL,
-    potential_tsunami BOOLEAN NOT NULL);
-	
-	CREATE TABLE if not exists tsunami_warnings (
-    warning_id VARCHAR(50) PRIMARY KEY,
-    related_event_id VARCHAR(50) NOT NULL,
-    threat_level VARCHAR(10) NOT NULL,
-    affected_zones TEXT NOT NULL,
-    estimated_arrival TIMESTAMPTZ NOT NULL,
-
-    CONSTRAINT fk_related_event
-        FOREIGN KEY (related_event_id)
-        REFERENCES seismic_event(event_id));`
-
-	_, err = db.Exec(sqlStmt)
-	if err != nil {
-		log.Printf("%q: %s\n", err, sqlStmt)
-		return
+	if err := runMigrations(db); err != nil {
+		log.Fatalf("applying BMKG migrations: %v", err)
 	}
+}
+
+func runMigrations(db *sql.DB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)`); err != nil {
+		return err
+	}
+	entries, err := fs.ReadDir(migrationFiles, "migrations")
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		var applied int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, entry.Name()).Scan(&applied); err != nil {
+			return err
+		}
+		if applied > 0 {
+			continue
+		}
+		script, err := migrationFiles.ReadFile("migrations/" + entry.Name())
+		if err != nil {
+			return err
+		}
+		transaction, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		if _, err = transaction.Exec(string(script)); err == nil {
+			_, err = transaction.Exec(`INSERT INTO schema_migrations(name) VALUES(?)`, entry.Name())
+		}
+		if err != nil {
+			_ = transaction.Rollback()
+			return fmt.Errorf("%s: %w", entry.Name(), err)
+		}
+		if err := transaction.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func fetchallevents() []SeismicEvent {
 	db, _ := sql.Open("sqlite3", databasePath())
@@ -325,6 +346,10 @@ var threatLevels = []string{
 }
 
 func GenerateEvent() {
+	generateEventAt(time.Now())
+}
+
+func generateEventAt(occurredAt time.Time) {
 	id := uuid.New()
 	seismic := SeismicEvent{
 		EventID:          id.String(),
@@ -333,7 +358,7 @@ func GenerateEvent() {
 		EpicenterLat:     gofakeit.Latitude(),
 		EpicenterLon:     gofakeit.Longitude(),
 		RegionName:       gofakeit.City(),
-		OccurredAt:       time.Now(),
+		OccurredAt:       occurredAt,
 		PotentialTsunami: gofakeit.Bool(),
 	}
 	db, _ := sql.Open("sqlite3", databasePath())
@@ -370,7 +395,7 @@ func GenerateEvent() {
 		RelatedEventID: id.String(),
 		ThreatLevel:    gofakeit.RandomString(threatLevels),
 		AffectedZones:  gofakeit.City(),
-		EstimatedArrival: time.Now().Add(
+		EstimatedArrival: occurredAt.Add(
 			time.Duration(gofakeit.IntRange(10, 180)) * time.Minute,
 		),
 	}
@@ -385,7 +410,7 @@ func GenerateEvent() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer stmt.Close()
+	defer stmt2.Close()
 
 	_, err = stmt2.Exec(tsunami.WarningID, tsunami.RelatedEventID, tsunami.ThreatLevel, tsunami.AffectedZones, tsunami.EstimatedArrival)
 	if err != nil {

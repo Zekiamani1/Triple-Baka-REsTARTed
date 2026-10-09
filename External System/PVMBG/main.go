@@ -2,8 +2,11 @@ package main
 
 import (
 	"crypto/subtle"
+	"database/sql"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -18,6 +21,9 @@ import (
 
 	"github.com/google/uuid"
 )
+
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
 
 var volcanos = []string{
 	"Sumbing",
@@ -178,16 +184,74 @@ func main() {
 }
 
 func initdb() {
-	db, _ = gorm.Open(sqlite.Open(envOrDefault("PVMBG_DB_PATH", "app.db")), &gorm.Config{})
+	databasePath := envOrDefault("PVMBG_DB_PATH", "app.db")
+	rawDB, err := sql.Open("sqlite3", databasePath)
+	if err != nil {
+		log.Fatalf("opening PVMBG database: %v", err)
+	}
+	if err := runMigrations(rawDB); err != nil {
+		_ = rawDB.Close()
+		log.Fatalf("applying PVMBG migrations: %v", err)
+	}
+	if err := rawDB.Close(); err != nil {
+		log.Fatalf("closing PVMBG migration connection: %v", err)
+	}
+	db, err = gorm.Open(sqlite.Open(databasePath), &gorm.Config{})
+	if err != nil {
+		log.Fatalf("opening PVMBG GORM connection: %v", err)
+	}
+}
 
-	db.AutoMigrate(&VolcanoReport{})
+func runMigrations(db *sql.DB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)`); err != nil {
+		return err
+	}
+	entries, err := fs.ReadDir(migrationFiles, "migrations")
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		var applied int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, entry.Name()).Scan(&applied); err != nil {
+			return err
+		}
+		if applied > 0 {
+			continue
+		}
+		script, err := migrationFiles.ReadFile("migrations/" + entry.Name())
+		if err != nil {
+			return err
+		}
+		transaction, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		if _, err = transaction.Exec(string(script)); err == nil {
+			_, err = transaction.Exec(`INSERT INTO schema_migrations(name) VALUES(?)`, entry.Name())
+		}
+		if err != nil {
+			_ = transaction.Rollback()
+			return fmt.Errorf("%s: %w", entry.Name(), err)
+		}
+		if err := transaction.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func GenerateEvent() {
+	generateEventAt(time.Now())
+}
+
+func generateEventAt(reportedAt time.Time) {
 	id := uuid.New()
 	report := VolcanoReport{}
 	gofakeit.Struct(&report)
 	report.ReportID = id.String()
-	report.ReportedAt = time.Now()
+	report.ReportedAt = reportedAt
 	if version == 1 {
 		report.ConfidenceLevel = 0
 	}
