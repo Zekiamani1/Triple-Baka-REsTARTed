@@ -143,7 +143,13 @@ async function listHazards(call: grpc.ServerUnaryCall<any, any>, callback: grpc.
         const offset = req.offset && req.offset >= 0 ? req.offset : 0;
 
         const [hazards, total] = await Promise.all([
-            collection.find(filter, { projection: { _id: 0, published: 0, published_at: 0 }}).skip(offset).limit(limit).toArray(),
+            collection.find(filter, {
+                projection: { _id: 0, published: 0, published_at: 0 }
+            })
+            .sort({ ingested_at: -1 })
+            .skip(offset)
+            .limit(limit)
+            .toArray(),
             collection.countDocuments(filter),
         ]);
 
