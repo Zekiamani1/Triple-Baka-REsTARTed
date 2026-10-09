@@ -81,7 +81,26 @@ func pvmbgRequest(targetURL string) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+requiredEnv("PVMBG_API_KEY"))
-	return http.DefaultClient.Do(req)
+	return httpClient().Do(req)
+}
+
+func httpClient() *http.Client {
+	seconds, err := strconv.Atoi(envOrDefault("HTTP_TIMEOUT_SECONDS", "5"))
+	if err != nil || seconds <= 0 {
+		log.Fatalf("HTTP_TIMEOUT_SECONDS must be a positive integer, got %q", os.Getenv("HTTP_TIMEOUT_SECONDS"))
+	}
+	return &http.Client{Timeout: time.Duration(seconds) * time.Second}
+}
+
+func startHealthServer() {
+	port := envOrDefault("HEALTH_PORT", "8086")
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+		if err := http.ListenAndServe(":"+port, mux); err != nil {
+			log.Printf("health server stopped: %v", err)
+		}
+	}()
 }
 
 func SendToAggregate(thething *proto.Hazard) {
@@ -177,6 +196,7 @@ func normalize(data VolcanoReport) proto.Hazard {
 	}
 }
 func main() {
+	startHealthServer()
 	interval := pollInterval()
 	now := time.Now()
 	ticker := time.NewTicker(interval)

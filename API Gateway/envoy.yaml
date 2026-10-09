@@ -21,6 +21,10 @@ static_resources:
                         allow_methods: GET, POST, OPTIONS
                         allow_headers: content-type,authorization,x-correlation-id
                       routes:
+                        - match: { path: "/health" }
+                          direct_response:
+                            status: 200
+                            body: { inline_string: "UP" }
                         - match: { path: "/auth/token" }
                           route: { cluster: auth_service }
                           typed_per_filter_config:

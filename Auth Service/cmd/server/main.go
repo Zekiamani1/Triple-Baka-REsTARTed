@@ -2,13 +2,10 @@ package main
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -29,7 +26,6 @@ import (
 
 type Config struct {
 	Port             string        // AUTH_PORT, default "8083" (the gRPC listener)
-	HealthPort       string        // AUTH_HEALTH_PORT, default "8084"
 	DSN              string        // AUTH_DB_DSN, required
 	KeyPath          string        // AUTH_JWT_PRIVATE_KEY_PATH, required
 	Issuer           string        // AUTH_ISSUER, default "bnpb-auth"
@@ -79,10 +75,6 @@ func loadConfig() (*Config, error) {
 	if port == "" {
 		port = "8083"
 	}
-	health := os.Getenv("AUTH_HEALTH_PORT")
-	if health == "" {
-		health = "8084"
-	}
 	db := os.Getenv("AUTH_DB_DSN")
 	if db == "" {
 		return nil, fmt.Errorf("AUTH_DB_DSN not set")
@@ -118,7 +110,6 @@ func loadConfig() (*Config, error) {
 	}
 	return &Config{
 		Port:             port,
-		HealthPort:       health,
 		DSN:              db,
 		KeyPath:          keypath,
 		Issuer:           issuer,
@@ -174,20 +165,10 @@ func run() error {
 		return err
 	}
 
-	httpServer := &http.Server{
-		Addr:    ":" + config.HealthPort,
-		Handler: http.HandlerFunc(healthHandler(db)),
-	}
-
-	serveErr := make(chan error, 2)
+	serveErr := make(chan error, 1)
 	go func() { serveErr <- grpcServer.Serve(listen) }()
-	go func() {
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			serveErr <- err
-		}
-	}()
 
-	slog.Info("auth service listening", "grpc_addr", listen.Addr().String(), "health_port", config.HealthPort)
+	slog.Info("auth service listening", "grpc_addr", listen.Addr().String())
 	select {
 	case err := <-serveErr:
 		return err
@@ -197,7 +178,6 @@ func run() error {
 	slog.Info("shutting down")
 	shutContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = httpServer.Shutdown(shutContext)
 	stopped := make(chan struct{})
 	go func() {
 		grpcServer.GracefulStop()
@@ -209,19 +189,4 @@ func run() error {
 		grpcServer.Stop()
 	}
 	return nil
-}
-
-func healthHandler(db *sql.DB) http.HandlerFunc {
-	return func(writer http.ResponseWriter, request *http.Request) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		writer.Header().Set("Content-type", "application/json")
-		if err := db.PingContext(ctx); err != nil {
-			writer.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(writer).Encode(map[string]string{"status": "unavailable"})
-			return
-		}
-		writer.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(writer).Encode(map[string]string{"status": "ok"})
-	}
 }

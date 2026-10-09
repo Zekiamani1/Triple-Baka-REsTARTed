@@ -19,13 +19,26 @@ const packageDefinition = protoLoader.loadSync(path.resolve("proto/hazard/hazard
   includeDirs: ["proto"],
 });
 
+const healthPackageDefinition = protoLoader.loadSync(
+  path.resolve("proto/grpc/health/v1/health.proto"),
+  {
+    keepCase: true,
+    longs: String,
+    enums: String,
+    defaults: true,
+    oneofs: true,
+  },
+);
+
 const proto = grpc.loadPackageDefinition(packageDefinition) as any;
+const healthProto = grpc.loadPackageDefinition(healthPackageDefinition) as any;
 
 const mongoClient = new MongoClient(mongo.uri);
 
 let collection: any;
 
 const hazardPackage = proto.hazard;
+const healthPackage = healthProto.grpc.health.v1;
 
 function protoToHazard(protoHazard: any) {
     return {
@@ -192,7 +205,6 @@ async function main () {
         process.exit(1);
     });
 
-
     const server = new grpc.Server();
 
     server.addService(hazardPackage.Aggregate.service, {
@@ -200,6 +212,14 @@ async function main () {
         getHazard,
         listHazards,
     } );
+    server.addService(healthPackage.Health.service, {
+        Check: (_call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) => {
+            callback(null, { status: "SERVING" });
+        },
+        Watch: (call: grpc.ServerWritableStream<any, any>) => {
+            call.write({ status: "SERVING" });
+        },
+    });
 
     server.bindAsync(
     `0.0.0.0:${service.port}`,

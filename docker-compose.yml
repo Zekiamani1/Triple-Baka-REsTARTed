@@ -83,6 +83,11 @@ services:
         condition: service_completed_successfully
       kafka-init-ingest:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "grpcurl -plaintext -proto /app/health.proto -d '{\"service\":\"\"}' localhost:$${AGGREGATOR_PORT} grpc.health.v1.Health/Check | grep -q SERVING"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
   bmkg:
     build: "./External System/BMKG"
     ports:
@@ -116,7 +121,7 @@ services:
       kafka-init-ingest:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "kill -0 1"]
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8085/health >/dev/null 2>&1"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -130,7 +135,7 @@ services:
       kafka-init-ingest:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "kill -0 1"]
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8086/health >/dev/null 2>&1"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -142,10 +147,16 @@ services:
       KAFKA_CLIENT_ID: event-consumer
       KAFKA_CONSUMER_GROUP: event-logger
       KAFKA_TOPIC_HAZARD_EVENTS: hazard-events
+      HEALTH_PORT: 8087
     depends_on:
       kafka-init:
         condition: service_completed_successfully
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8087/health >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
   alert-consumer:
     build: "./Alert Consumer"
     environment:
@@ -153,10 +164,16 @@ services:
       KAFKA_CLIENT_ID: alert-consumer
       KAFKA_CONSUMER_GROUP: emergency-notifier
       KAFKA_TOPIC_HAZARD_EVENTS: hazard-events
+      HEALTH_PORT: 8088
     depends_on:
       kafka-init:
         condition: service_completed_successfully
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8088/health >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
   auth-db:
     image: postgres:16-alpine
     environment:
@@ -205,7 +222,7 @@ services:
     volumes:
       - auth-keys:/app/keys:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8084/health || exit 1"]
+      test: ["CMD-SHELL", "grpcurl -plaintext -proto /app/health.proto -d '{\"service\":\"\"}' localhost:$${AUTH_PORT} grpc.health.v1.Health/Check | grep -q SERVING"]
       interval: 5s
       timeout: 3s
       retries: 10
