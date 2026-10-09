@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 )
 
+//go:embed migrations/*.sql
 var migrationFiles embed.FS
 
 func envOrDefault(name, fallback string) string {
@@ -36,6 +37,14 @@ func positiveSecondsFromEnv(name string, fallback int) time.Duration {
 		log.Fatalf("%s must be a positive integer, got %q", name, value)
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func responseDelay() time.Duration {
+	milliseconds, err := strconv.Atoi(envOrDefault("BMKG_RESPONSE_DELAY_MS", "100"))
+	if err != nil || milliseconds < 50 || milliseconds > 150 {
+		log.Fatalf("BMKG_RESPONSE_DELAY_MS must be between 50 and 150, got %q", os.Getenv("BMKG_RESPONSE_DELAY_MS"))
+	}
+	return time.Duration(milliseconds) * time.Millisecond
 }
 
 func databasePath() string {
@@ -67,6 +76,7 @@ func apiKeyMiddleware(next http.Handler) http.Handler {
 			http.Error(w, "invalid BMKG credentials", http.StatusForbidden)
 			return
 		}
+		time.Sleep(responseDelay())
 		next.ServeHTTP(w, r)
 	})
 }

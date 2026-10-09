@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"strconv"
@@ -77,6 +78,15 @@ func positiveSecondsFromEnv(name string, fallback int) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+func responseDelay() time.Duration {
+	minimum, minErr := strconv.Atoi(envOrDefault("PVMBG_MIN_DELAY_MS", "500"))
+	maximum, maxErr := strconv.Atoi(envOrDefault("PVMBG_MAX_DELAY_MS", "3000"))
+	if minErr != nil || maxErr != nil || minimum < 500 || maximum > 3000 || minimum > maximum {
+		log.Fatalf("PVMBG_MIN_DELAY_MS and PVMBG_MAX_DELAY_MS must be between 500 and 3000")
+	}
+	return time.Duration(minimum+rand.IntN(maximum-minimum+1)) * time.Millisecond
+}
+
 func requireEnv(name string) string {
 	value := os.Getenv(name)
 	if value == "" {
@@ -118,9 +128,16 @@ func schemachange(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "Schema Changed")
 }
 func doOutage(w http.ResponseWriter, r *http.Request) {
-	outage = true
+	var request struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "request body must be {\"enabled\": true|false}", http.StatusBadRequest)
+		return
+	}
+	outage = request.Enabled
 	w.WriteHeader(200)
-	fmt.Fprint(w, "Outage happened")
+	fmt.Fprintf(w, "outage=%t", outage)
 }
 func VolcanoReportHandler(w http.ResponseWriter, r *http.Request) {
 	var reports []VolcanoReport
@@ -152,11 +169,15 @@ func VolcanoReportHandler(w http.ResponseWriter, r *http.Request) {
 }
 func outageMiddleware(outage *bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/admin/outage" || r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if *outage {
 			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 			return
 		}
-
+		time.Sleep(responseDelay())
 		next.ServeHTTP(w, r)
 	})
 }
