@@ -272,6 +272,7 @@ func generateEventAt(reportedAt time.Time) {
 	report := VolcanoReport{}
 	gofakeit.Struct(&report)
 	report.ReportID = id.String()
+	report.VolcanoID = gofakeit.RandomString(volcanos)
 	report.ReportedAt = reportedAt
 	if version == 1 {
 		report.ConfidenceLevel = 0
