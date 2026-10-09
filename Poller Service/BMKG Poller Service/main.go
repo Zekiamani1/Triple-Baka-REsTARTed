@@ -168,8 +168,8 @@ func normalize(data SeismicEvent, warnings []TsunamiWarning) hazard.Hazard {
 				attributemap["affected_zones"] = warn.AffectedZones
 				attributemap["threat_level"] = warn.ThreatLevel
 				attributemap["estimated_arrival"] = warn.EstimatedArrival.Format(time.RFC3339)
+				break
 			}
-			break
 		}
 	}
 
@@ -190,9 +190,9 @@ func normalize(data SeismicEvent, warnings []TsunamiWarning) hazard.Hazard {
 		switch {
 		case data.Magnitude < 5.0:
 			severity = hazard.Severity_NORMAL
-		case 5.0 <= data.Magnitude && data.Magnitude <= 6.5:
+		case 5.0 <= data.Magnitude && data.Magnitude < 6.5:
 			severity = hazard.Severity_WASPADA
-		case 6.5 < data.Magnitude:
+		case 6.5 <= data.Magnitude:
 			severity = hazard.Severity_SIAGA
 
 		}

@@ -32,6 +32,34 @@ type VolcanoReport struct {
 	Extra            map[string]any `json:",embed"`
 }
 
+type volcanoReference struct {
+	areaName  string
+	latitude  float64
+	longitude float64
+}
+
+var volcanoReferences = map[string]volcanoReference{
+	"Sumbing":          {"Gunung Sumbing", -7.384, 110.072},
+	"Salak":            {"Gunung Salak", -6.719, 106.733},
+	"Gede":             {"Gunung Gede", -6.770, 106.999},
+	"Tangkuban Parahu": {"Gunung Tangkuban Parahu", -6.759, 107.609},
+	"Guntur":           {"Gunung Guntur", -7.143, 107.840},
+	"Papandayan":       {"Gunung Papandayan", -7.319, 107.730},
+	"Galunggung":       {"Gunung Galunggung", -7.256, 108.078},
+	"Ciremai":          {"Gunung Ciremai", -6.892, 108.408},
+	"Slamet":           {"Gunung Slamet", -7.242, 109.208},
+	"Dieng":            {"Kompleks Vulkanik Dieng", -7.200, 109.920},
+	"Sundoro":          {"Gunung Sundoro", -7.300, 109.992},
+	"Merapi":           {"Gunung Merapi", -7.540, 110.446},
+	"Kelud":            {"Gunung Kelud", -7.935, 112.314},
+	"Arjuno Welirang":  {"Kompleks Arjuno-Welirang", -7.725, 112.580},
+	"Bromo":            {"Gunung Bromo", -7.942, 112.953},
+	"Semeru":           {"Gunung Semeru", -8.108, 112.922},
+	"Lamongan":         {"Gunung Lamongan", -7.979, 113.341},
+	"Raung":            {"Gunung Raung", -8.125, 114.042},
+	"Ijen":             {"Kompleks Ijen", -8.058, 114.242},
+}
+
 func envOrDefault(name, fallback string) string {
 	if value := os.Getenv(name); value != "" {
 		return value
@@ -111,10 +139,17 @@ func poll(since time.Time) (reports []VolcanoReport, err error) {
 }
 
 func normalize(data VolcanoReport) proto.Hazard {
-	attribute, err := structpb.NewStruct(data.Extra)
+	attributes := data.Extra
+	if attributes == nil {
+		attributes = make(map[string]any)
+	}
+	attributes["eruption_count_24h"] = data.EruptionCount24h
+	attributes["ash_column_height_m"] = data.AshColumnHeightM
+	attribute, err := structpb.NewStruct(attributes)
 	if err != nil {
 		println(err.Error())
 	}
+	reference := volcanoReferences[data.VolcanoID]
 	var severity proto.Severity
 	switch data.AlertLevel {
 	case "Normal":
@@ -132,10 +167,10 @@ func normalize(data VolcanoReport) proto.Hazard {
 		Source:      proto.Source_PVMBG,
 		SourceRefId: data.ReportID,
 		HazardType:  proto.HazardType_VOLCANIC,
-		Longitude:   0,
-		Latitude:    0, //belum
+		Longitude:   reference.longitude,
+		Latitude:    reference.latitude,
 		Severity:    severity,
-		AreaName:    data.VolcanoID,
+		AreaName:    reference.areaName,
 		OccurredAt:  timestamppb.New(data.ReportedAt),
 		IngestedAt:  timestamppb.New(time.Now()),
 		Attributes:  attribute,
