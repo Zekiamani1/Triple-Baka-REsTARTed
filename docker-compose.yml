@@ -222,7 +222,7 @@ services:
     volumes:
       - auth-keys:/app/keys:ro
     healthcheck:
-      test: ["CMD-SHELL", "grpcurl -plaintext -proto /app/health.proto -d '{\"service\":\"\"}' localhost:$${AUTH_PORT} grpc.health.v1.Health/Check | grep -q SERVING"]
+      test: ["CMD-SHELL", "grpcurl -plaintext -proto health.proto -d '{\"service\":\"\"}' localhost:$${AUTH_PORT} grpc.health.v1.Health/Check | grep -q SERVING"]
       interval: 5s
       timeout: 3s
       retries: 10
