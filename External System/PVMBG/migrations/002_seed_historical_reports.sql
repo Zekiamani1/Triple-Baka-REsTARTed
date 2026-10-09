@@ -4,7 +4,7 @@ WITH RECURSIVE seed(n) AS (
     SELECT n + 1 FROM seed WHERE n < 20
 )
 INSERT INTO volcano_reports (
-    report_id, volcano_id, alert_level, eruption_count24h,
+    report_id, volcano_id, alert_level, eruption_count_24h,
     ash_column_height_m, reported_at
 )
 SELECT
