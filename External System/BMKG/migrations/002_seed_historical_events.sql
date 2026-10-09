@@ -3,7 +3,7 @@ WITH RECURSIVE seed(n) AS (
     UNION ALL
     SELECT n + 1 FROM seed WHERE n < 20
 )
-INSERT INTO seismic_event (
+INSERT OR IGNORE INTO seismic_event (
     event_id, magnitude, depth_km, epicenter_lat, epicenter_lon,
     region_name, occurred_at, potential_tsunami
 )
@@ -18,7 +18,7 @@ SELECT
     CASE WHEN n % 4 = 0 THEN 1 ELSE 0 END
 FROM seed;
 
-INSERT INTO tsunami_warnings (
+INSERT OR IGNORE INTO tsunami_warnings (
     warning_id, related_event_id, threat_level, affected_zones, estimated_arrival
 )
 SELECT

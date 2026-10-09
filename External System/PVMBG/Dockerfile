@@ -15,6 +15,6 @@ RUN apk add --no-cache ca-certificates
 WORKDIR /data
 COPY --from=builder /out/pvmbg /app/pvmbg
 
-EXPOSE 6767
+EXPOSE 8082
 
 CMD ["/app/pvmbg"]

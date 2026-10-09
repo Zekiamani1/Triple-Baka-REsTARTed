@@ -15,6 +15,6 @@ RUN apk add --no-cache ca-certificates
 WORKDIR /data
 COPY --from=builder /out/bmkg /app/bmkg
 
-EXPOSE 6767
+EXPOSE 8081
 
 CMD ["/app/bmkg"]
