@@ -103,11 +103,10 @@ func startHealthServer() {
 	}()
 }
 
-func SendToAggregate(thething *proto.Hazard) {
+func SendToAggregate(thething *proto.Hazard) error {
 	payload, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(thething)
 	if err != nil {
-		log.Printf("Failed to encode HazardEvent: %v", err)
-		return
+		return fmt.Errorf("encode HazardEvent: %w", err)
 	}
 
 	writer := &kafka.Writer{
@@ -122,8 +121,9 @@ func SendToAggregate(thething *proto.Hazard) {
 		Value: payload,
 	})
 	if err != nil {
-		log.Printf("Failed to publish HazardEvent to Kafka: %v", err)
+		return fmt.Errorf("publish HazardEvent to Kafka: %w", err)
 	}
+	return nil
 }
 
 type fetchresult[T any] struct {
@@ -138,7 +138,6 @@ func poll(since time.Time) (reports []VolcanoReport, err error) {
 	resp, err := pvmbgRequest(targeturl)
 
 	if err != nil {
-		log.Print(err.Error())
 		return
 	}
 	defer resp.Body.Close()
@@ -146,14 +145,13 @@ func poll(since time.Time) (reports []VolcanoReport, err error) {
 		return nil, fmt.Errorf("PVMBG returned HTTP %d", resp.StatusCode)
 	}
 	a, err := io.ReadAll(resp.Body)
-	println(string(a))
+	if err != nil {
+		return nil, fmt.Errorf("read PVMBG response: %w", err)
+	}
 
 	if err = json.UnmarshalRead(bytes.NewReader(a), &reports); err != nil {
-		log.Printf("Error decoding JSON: %v", err)
 		return
 	}
-	a, err = json.Marshal(reports[0])
-	println(string(a))
 	return
 }
 
@@ -203,13 +201,22 @@ func main() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		events, _ := poll(now)
-		now = time.Now()
+		events, err := poll(now)
+		if err != nil {
+			log.Printf("PVMBG poll failed; keeping cursor %s: %v", now.Format(time.RFC3339), err)
+			continue
+		}
+		published := true
 		for _, data := range events {
-			go func() {
-				normalized := normalize(data)
-				SendToAggregate(&normalized)
-			}()
+			normalized := normalize(data)
+			if err := SendToAggregate(&normalized); err != nil {
+				log.Printf("PVMBG publish failed; keeping cursor %s: %v", now.Format(time.RFC3339), err)
+				published = false
+				break
+			}
+		}
+		if published {
+			now = time.Now()
 		}
 	}
 }
