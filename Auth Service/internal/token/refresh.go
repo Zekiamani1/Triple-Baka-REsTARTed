@@ -9,6 +9,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"time"
+
+	"auth-service/internal/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var ErrInvalidRefreshToken = errors.New("token: invalid refresh token")
@@ -27,15 +33,42 @@ func NewPostgresRefreshRepo(db *sql.DB) *PostgresRefreshRepo {
 }
 
 func (this *PostgresRefreshRepo) Store(ctx context.Context, tokenHash, clientID string, expiresAt time.Time) error {
+	ctx, span := otel.Tracer(telemetry.ScopeName).Start(ctx, "PostgresRefreshRepo.Store",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "postgresql"),
+			attribute.String("db.operation", "StoreRefreshToken"),
+			attribute.String("auth.client_id", clientID),
+		),
+	)
+	defer span.End()
+
+	start := time.Now()
 	const query = `
 		INSERT INTO refresh_tokens (client_id, token_hash, expires_at)
 		VALUES ($1, $2, $3)
 	`
 	_, err := this.db.ExecContext(ctx, query, clientID, tokenHash, expiresAt.UTC())
+	durationMs := float64(time.Since(start).Nanoseconds()) / 1e6
+	telemetry.RecordDBQuery(ctx, "StoreRefreshToken", durationMs)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
+	}
 	return err
 }
 
 func (this *PostgresRefreshRepo) Consume(ctx context.Context, tokenHash string) (string, error) {
+	ctx, span := otel.Tracer(telemetry.ScopeName).Start(ctx, "PostgresRefreshRepo.Consume",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "postgresql"),
+			attribute.String("db.operation", "ConsumeRefreshToken"),
+		),
+	)
+	defer span.End()
+
+	start := time.Now()
 	const query = `
 		UPDATE refresh_tokens SET revoked_at = NOW()
 		WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > NOW()
@@ -43,8 +76,14 @@ func (this *PostgresRefreshRepo) Consume(ctx context.Context, tokenHash string) 
 	`
 	var id string
 	err := this.db.QueryRowContext(ctx, query, tokenHash).Scan(&id)
+	durationMs := float64(time.Since(start).Nanoseconds()) / 1e6
+	telemetry.RecordDBQuery(ctx, "ConsumeRefreshToken", durationMs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrInvalidRefreshToken
+	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 	}
 	return id, err
 }

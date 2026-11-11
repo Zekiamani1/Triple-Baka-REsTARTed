@@ -15,6 +15,7 @@ import (
 	"auth-service/internal/client"
 	"auth-service/internal/keys"
 	"auth-service/internal/server"
+	"auth-service/internal/telemetry"
 	"auth-service/internal/token"
 	authv1 "auth-service/proto/auth/v1"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -124,6 +125,19 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	shutdownTelemetry, err := telemetry.Init(ctx, "auth-service")
+	if err != nil {
+		slog.Warn("failed to initialize OpenTelemetry", "err", err)
+	} else {
+		defer func() {
+			otelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdownTelemetry(otelCtx); err != nil {
+				slog.Warn("failed to shutdown OpenTelemetry", "err", err)
+			}
+		}()
+	}
+
 	config, err := loadConfig()
 	if err != nil {
 		return err
@@ -146,8 +160,9 @@ func run() error {
 		RefreshTokenTTL: config.RefreshTokenTTL,
 	})
 	grpcServer := grpc.NewServer(grpc.ChainUnaryInterceptor(
-		server.Recovery(),
 		server.Correlation(),
+		server.Telemetry(),
+		server.Recovery(),
 		server.Logging(),
 	))
 	authv1.RegisterAuthServiceServer(grpcServer, authServer)

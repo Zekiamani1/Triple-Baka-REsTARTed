@@ -7,6 +7,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-metrics-otlp-grpc": "^0.223.1",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.223.1",
+    "@opentelemetry/instrumentation-http": "^0.223.1",
+    "@opentelemetry/resources": "^2.12.1",
+    "@opentelemetry/sdk-metrics": "^2.12.1",
+    "@opentelemetry/sdk-node": "^0.223.1",
+    "@opentelemetry/semantic-conventions": "^1.45.0",
     "kafkajs": "^2.2.4"
   },
   "devDependencies": {
