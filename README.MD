@@ -17,6 +17,9 @@ BNPB periodically polls both sources and maps the retrieved data into a standard
 Create local environment files from the provided examples:
 
 ```bash
+cp 'Aggregate Service/.env.example' 'Aggregate Service/.env'
+cp 'Event Consumer/.env.example' 'Event Consumer/.env'
+cp 'Alert Consumer/.env.example' 'Alert Consumer/.env'
 cp 'Auth Service/.env.example' 'Auth Service/.env'
 cp 'External System/BMKG/.env.example' 'External System/BMKG/.env'
 cp 'External System/PVMBG/.env.example' 'External System/PVMBG/.env'

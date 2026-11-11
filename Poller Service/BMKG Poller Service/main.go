@@ -4,17 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"bmkg-poller/hazard"
 
 	"github.com/google/uuid"
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -48,24 +55,27 @@ func envOrDefault(name, fallback string) string {
 func requiredEnv(name string) string {
 	value := os.Getenv(name)
 	if value == "" {
-		log.Fatalf("%s must be configured", name)
+		slog.Error("required environment variable not configured", "env", name)
+		os.Exit(1)
 	}
 	return value
 }
 
-func bmkgRequest(targetURL string) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodGet, targetURL, nil)
+func bmkgRequest(ctx context.Context, targetURL string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("X-BMKG-Key", requiredEnv("BMKG_API_KEY"))
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 	return httpClient().Do(req)
 }
 
 func httpClient() *http.Client {
 	seconds, err := strconv.Atoi(envOrDefault("HTTP_TIMEOUT_SECONDS", "5"))
 	if err != nil || seconds <= 0 {
-		log.Fatalf("HTTP_TIMEOUT_SECONDS must be a positive integer, got %q", os.Getenv("HTTP_TIMEOUT_SECONDS"))
+		slog.Error("HTTP_TIMEOUT_SECONDS must be a positive integer", "value", os.Getenv("HTTP_TIMEOUT_SECONDS"))
+		os.Exit(1)
 	}
 	return &http.Client{Timeout: time.Duration(seconds) * time.Second}
 }
@@ -76,28 +86,62 @@ func startHealthServer() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 		if err := http.ListenAndServe(":"+port, mux); err != nil {
-			log.Printf("health server stopped: %v", err)
+			slog.Error("health server stopped", "err", err)
 		}
 	}()
 }
 
-func SendToAggregate(thething *hazard.Hazard) error {
+func SendToAggregate(ctx context.Context, thething *hazard.Hazard) error {
+	topic := envOrDefault("KAFKA_TOPIC_HAZARD_INGEST", "hazard-ingest")
+	ctx, span := otel.Tracer(bmkgPollerScope).Start(ctx, "kafka.publish "+topic,
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "kafka"),
+			attribute.String("messaging.operation", "publish"),
+			attribute.String("messaging.destination.name", topic),
+			attribute.String("hazard.id", thething.HazardId),
+			attribute.String("hazard.source", thething.Source.String()),
+			attribute.String("hazard.type", thething.HazardType.String()),
+			attribute.String("hazard.severity", thething.Severity.String()),
+		),
+	)
+	defer span.End()
+
+	start := time.Now()
 	payload, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(thething)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		return fmt.Errorf("encode HazardEvent: %w", err)
 	}
 
 	writer := &kafka.Writer{
 		Addr:     kafka.TCP(envOrDefault("KAFKA_BROKERS", "kafka-aggregate:29092")),
-		Topic:    envOrDefault("KAFKA_TOPIC_HAZARD_INGEST", "hazard-ingest"),
+		Topic:    topic,
 		Balancer: &kafka.Hash{},
 	}
 	defer writer.Close()
 
-	err = writer.WriteMessages(context.Background(), kafka.Message{
-		Key:   []byte(thething.HazardId),
-		Value: payload,
+	var headers kafkaHeaderCarrier
+	otel.GetTextMapPropagator().Inject(ctx, &headers)
+
+	err = writer.WriteMessages(ctx, kafka.Message{
+		Key:     []byte(thething.HazardId),
+		Value:   payload,
+		Headers: headers,
 	})
+	durationMs := float64(time.Since(start).Nanoseconds()) / 1e6
+	statusStr := "success"
+	if err != nil {
+		statusStr = "error"
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
+	} else {
+		span.SetStatus(otelcodes.Ok, "")
+	}
+
+	recordKafkaPublish(ctx, topic, thething.Severity.String(), statusStr, durationMs)
+
 	if err != nil {
 		return fmt.Errorf("publish HazardEvent to Kafka: %w", err)
 	}
@@ -109,61 +153,110 @@ type fetchresult[T any] struct {
 	result T
 }
 
-func fetchSeismicEvent(since time.Time, channel chan fetchresult[[]SeismicEvent]) {
+func fetchSeismicEvent(ctx context.Context, since time.Time, channel chan fetchresult[[]SeismicEvent]) {
 	var events []SeismicEvent
 	bmkgadress := envOrDefault("BMKG_BASE_URL", "http://bmkg:8081")
-
 	targeturl := fmt.Sprintf("%s/seismic-events?since=%s", bmkgadress, url.QueryEscape(since.Format(time.RFC3339)))
-	resp, err := bmkgRequest(targeturl)
+
+	ctx, span := otel.Tracer(bmkgPollerScope).Start(ctx, "BMKGPoller.fetchSeismicEvent",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("http.request.method", http.MethodGet),
+			attribute.String("url.full", targeturl),
+		),
+	)
+	defer span.End()
+
+	start := time.Now()
+	resp, err := bmkgRequest(ctx, targeturl)
+	durationMs := float64(time.Since(start).Nanoseconds()) / 1e6
 
 	if err != nil {
-		log.Print(err.Error())
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
+		recordHTTPClientDuration(ctx, "seismic-events", 0, durationMs)
+		slog.ErrorContext(ctx, "fetch seismic events request failed", "err", err)
 		channel <- fetchresult[[]SeismicEvent]{err: err, result: nil}
 		return
 	}
 	defer resp.Body.Close()
+	span.SetAttributes(attribute.Int("http.response.status_code", resp.StatusCode))
+	recordHTTPClientDuration(ctx, "seismic-events", resp.StatusCode, durationMs)
+
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("BMKG returned HTTP %d", resp.StatusCode)
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		channel <- fetchresult[[]SeismicEvent]{err: err, result: nil}
 		return
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
-		log.Printf("Error decoding JSON: %v", err)
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
+		slog.ErrorContext(ctx, "decode seismic events JSON failed", "err", err)
 		channel <- fetchresult[[]SeismicEvent]{err: err, result: nil}
 		return
 	}
+	span.SetAttributes(attribute.Int("events.count", len(events)))
+	recordEventsFetched(ctx, "seismic", len(events))
 	channel <- fetchresult[[]SeismicEvent]{err: nil, result: events}
 }
-func fetchTsunamiWarning(since time.Time, channel chan fetchresult[[]TsunamiWarning]) {
+
+func fetchTsunamiWarning(ctx context.Context, since time.Time, channel chan fetchresult[[]TsunamiWarning]) {
 	var warnings []TsunamiWarning
 	bmkgadress := envOrDefault("BMKG_BASE_URL", "http://bmkg:8081")
-
 	targeturl := fmt.Sprintf("%s/tsunami-warnings?since=%s", bmkgadress, url.QueryEscape(since.Format(time.RFC3339)))
-	resp, err := bmkgRequest(targeturl)
+
+	ctx, span := otel.Tracer(bmkgPollerScope).Start(ctx, "BMKGPoller.fetchTsunamiWarning",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("http.request.method", http.MethodGet),
+			attribute.String("url.full", targeturl),
+		),
+	)
+	defer span.End()
+
+	start := time.Now()
+	resp, err := bmkgRequest(ctx, targeturl)
+	durationMs := float64(time.Since(start).Nanoseconds()) / 1e6
+
 	if err != nil {
-		log.Print(err.Error())
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
+		recordHTTPClientDuration(ctx, "tsunami-warnings", 0, durationMs)
+		slog.ErrorContext(ctx, "fetch tsunami warnings request failed", "err", err)
 		channel <- fetchresult[[]TsunamiWarning]{err: err, result: nil}
 		return
 	}
 	defer resp.Body.Close()
+	span.SetAttributes(attribute.Int("http.response.status_code", resp.StatusCode))
+	recordHTTPClientDuration(ctx, "tsunami-warnings", resp.StatusCode, durationMs)
+
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("BMKG returned HTTP %d", resp.StatusCode)
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		channel <- fetchresult[[]TsunamiWarning]{err: err, result: nil}
 		return
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&warnings); err != nil {
-		log.Printf("Error decoding JSON: %v", err)
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
+		slog.ErrorContext(ctx, "decode tsunami warnings JSON failed", "err", err)
 		channel <- fetchresult[[]TsunamiWarning]{err: err, result: nil}
 		return
 	}
+	span.SetAttributes(attribute.Int("warnings.count", len(warnings)))
+	recordEventsFetched(ctx, "tsunami", len(warnings))
 	channel <- fetchresult[[]TsunamiWarning]{err: nil, result: warnings}
 }
-func poll(since time.Time) ([]SeismicEvent, []TsunamiWarning, error) {
+
+func poll(ctx context.Context, since time.Time) ([]SeismicEvent, []TsunamiWarning, error) {
 	chan1 := make(chan fetchresult[[]SeismicEvent])
 	chan2 := make(chan fetchresult[[]TsunamiWarning])
-	go fetchSeismicEvent(since, chan1)
-	go fetchTsunamiWarning(since, chan2)
+	go fetchSeismicEvent(ctx, since, chan1)
+	go fetchTsunamiWarning(ctx, since, chan2)
 	result1 := <-chan1
 	if result1.err != nil {
 		return nil, nil, result1.err
@@ -174,7 +267,7 @@ func poll(since time.Time) ([]SeismicEvent, []TsunamiWarning, error) {
 	}
 	return result1.result, result2.result, nil
 }
-func normalize(data SeismicEvent, warnings []TsunamiWarning) hazard.Hazard {
+func normalize(ctx context.Context, data SeismicEvent, warnings []TsunamiWarning) hazard.Hazard {
 	attributemap := map[string]any{
 		"magnitude":         data.Magnitude,
 		"depth_km":          data.DepthKM,
@@ -192,9 +285,9 @@ func normalize(data SeismicEvent, warnings []TsunamiWarning) hazard.Hazard {
 		}
 	}
 
-	attribute, err := structpb.NewStruct(attributemap)
+	attrStruct, err := structpb.NewStruct(attributemap)
 	if err != nil {
-		println(err.Error())
+		slog.ErrorContext(ctx, "failed to build protobuf struct for BMKG attributes", "err", err)
 	}
 	var severity hazard.Severity
 
@@ -230,33 +323,76 @@ func normalize(data SeismicEvent, warnings []TsunamiWarning) hazard.Hazard {
 		Longitude:  data.EpicenterLon,
 		OccurredAt: timestamppb.New(data.OccurredAt),
 		IngestedAt: timestamppb.New(time.Now()),
-		Attributes: attribute,
+		Attributes: attrStruct,
 	}
 }
 func main() {
+	slog.SetDefault(slog.New(newContextLogHandler(slog.NewJSONHandler(os.Stdout, nil))))
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	shutdownTelemetry, err := initTelemetry(ctx)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to initialize OpenTelemetry", "err", err)
+	} else {
+		defer func() {
+			otelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = shutdownTelemetry(otelCtx)
+		}()
+	}
+
 	startHealthServer()
 	interval := pollInterval()
 	now := time.Now()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		events, warnings, err := poll(now)
-		if err != nil {
-			log.Printf("BMKG poll failed; keeping cursor %s: %v", now.Format(time.RFC3339), err)
-			continue
-		}
-		published := true
-		for _, data := range events {
-			normalized := normalize(data, warnings)
-			if err := SendToAggregate(&normalized); err != nil {
-				log.Printf("BMKG publish failed; keeping cursor %s: %v", now.Format(time.RFC3339), err)
-				published = false
-				break
+	slog.InfoContext(ctx, "BMKG poller started", "interval_seconds", interval.Seconds())
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cycleStart := time.Now()
+			cycleCtx, cycleSpan := otel.Tracer(bmkgPollerScope).Start(ctx, "BMKGPoller.PollCycle",
+				trace.WithAttributes(attribute.String("poll.cursor", now.Format(time.RFC3339))),
+			)
+
+			events, warnings, err := poll(cycleCtx, now)
+			if err != nil {
+				slog.ErrorContext(cycleCtx, "BMKG poll failed; keeping cursor", "cursor", now.Format(time.RFC3339), "err", err)
+				cycleSpan.RecordError(err)
+				cycleSpan.SetStatus(otelcodes.Error, err.Error())
+				cycleSpan.End()
+				durationMs := float64(time.Since(cycleStart).Nanoseconds()) / 1e6
+				recordPollCycle(cycleCtx, "error", durationMs)
+				continue
 			}
-		}
-		if published {
-			now = time.Now()
+
+			published := true
+			for _, data := range events {
+				normalized := normalize(cycleCtx, data, warnings)
+				if err := SendToAggregate(cycleCtx, &normalized); err != nil {
+					slog.ErrorContext(cycleCtx, "BMKG publish failed; keeping cursor", "cursor", now.Format(time.RFC3339), "err", err)
+					cycleSpan.RecordError(err)
+					cycleSpan.SetStatus(otelcodes.Error, err.Error())
+					published = false
+					break
+				}
+			}
+
+			durationMs := float64(time.Since(cycleStart).Nanoseconds()) / 1e6
+			if published {
+				now = time.Now()
+				cycleSpan.SetStatus(otelcodes.Ok, "")
+				recordPollCycle(cycleCtx, "success", durationMs)
+			} else {
+				recordPollCycle(cycleCtx, "error", durationMs)
+			}
+			cycleSpan.End()
 		}
 	}
 }
@@ -266,7 +402,8 @@ func pollInterval() time.Duration {
 	if value := os.Getenv("POLL_INTERVAL_SECONDS"); value != "" {
 		parsed, err := strconv.Atoi(value)
 		if err != nil || parsed <= 0 {
-			log.Fatalf("POLL_INTERVAL_SECONDS must be a positive integer, got %q", value)
+			slog.Error("POLL_INTERVAL_SECONDS must be a positive integer", "value", value)
+			os.Exit(1)
 		}
 		seconds = parsed
 	}

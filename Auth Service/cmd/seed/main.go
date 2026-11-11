@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"time"
 
@@ -12,6 +12,7 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(server.NewContextHandler(slog.NewJSONHandler(os.Stdout, nil))))
 	cont := context.Background()
 	clients := []client.SeedSpec{
 		{
@@ -36,21 +37,24 @@ func main() {
 	dsn := getEnv("AUTH_DB_DSN")
 	database, err := server.ConnectDBWithRetry(cont, dsn, 10, 2*time.Second)
 	if err != nil {
-		log.Fatalf("connecting to db failed: %v", err)
+		slog.ErrorContext(cont, "connecting to db failed", "err", err)
+		os.Exit(1)
 	}
 	defer database.Close()
 	repo := client.NewPostgresRepo(database)
 	err = client.SeedClients(cont, repo, clients)
 	if err != nil {
-		log.Fatalf("seed failed: %v", err)
+		slog.ErrorContext(cont, "seed failed", "err", err)
+		os.Exit(1)
 	}
-	log.Println("seeding clients done")
+	slog.InfoContext(cont, "seeding clients done")
 }
 
 func getEnv(key string) string {
 	envar := os.Getenv(key)
 	if envar == "" {
-		log.Fatalf("seed: required env var %s is not set", key)
+		slog.Error("seed: required env var is not set", "env", key)
+		os.Exit(1)
 	}
 	return envar
 }
