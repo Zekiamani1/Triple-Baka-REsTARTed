@@ -21,29 +21,31 @@ import type { IHeaders } from "kafkajs";
 
 export const SCOPE_NAME = process.env.OTEL_SERVICE_NAME ?? "alert-consumer";
 
-const sdk = new NodeSDK({
-  resource: resourceFromAttributes({
-    [ATTR_SERVICE_NAME]: SCOPE_NAME,
-    [ATTR_SERVICE_VERSION]: "1.0.0",
-  }),
-  traceExporter: new OTLPTraceExporter(),
-  metricReader: new PeriodicExportingMetricReader({
-    exporter: new OTLPMetricExporter(),
-    exportIntervalMillis: Number(process.env.OTEL_METRIC_EXPORT_INTERVAL ?? "10000"),
-  }),
-  instrumentations: [new HttpInstrumentation()],
-});
+export function initTelemetry(): () => Promise<void> {
+  if (process.env.OTEL_SDK_DISABLED === "true") {
+    return async () => {};
+  }
 
-if (process.env.OTEL_SDK_DISABLED !== "true") {
+  const sdk = new NodeSDK({
+    resource: resourceFromAttributes({
+      [ATTR_SERVICE_NAME]: SCOPE_NAME,
+      [ATTR_SERVICE_VERSION]: "1.0.0",
+    }),
+    traceExporter: new OTLPTraceExporter(),
+    metricReader: new PeriodicExportingMetricReader({
+      exporter: new OTLPMetricExporter(),
+      exportIntervalMillis: Number(process.env.OTEL_METRIC_EXPORT_INTERVAL ?? "10000"),
+    }),
+    instrumentations: [new HttpInstrumentation()],
+  });
+
   sdk.start();
-}
 
-export async function shutdownTelemetry(): Promise<void> {
-  if (process.env.OTEL_SDK_DISABLED !== "true") {
+  return async () => {
     await sdk.shutdown().catch((err) => {
       logError("failed to shutdown OpenTelemetry SDK", { err: String(err) });
     });
-  }
+  };
 }
 
 function writeLog(level: "INFO" | "WARN" | "ERROR", msg: string, attrs: Record<string, unknown> = {}): void {
