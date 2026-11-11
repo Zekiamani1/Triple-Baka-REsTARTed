@@ -227,6 +227,8 @@ services:
       - "3000:3000"   # Grafana UI (admin / admin)
       - "4317:4317"   # OTLP gRPC receiver
       - "4318:4318"   # OTLP HTTP receiver
+    volumes:
+      - lgtm-data:/data
     restart: unless-stopped
 volumes:
   kafka-data:
@@ -234,3 +236,4 @@ volumes:
   pvmbg-data:
   auth-db-data:
   auth-keys:
+  lgtm-data:
