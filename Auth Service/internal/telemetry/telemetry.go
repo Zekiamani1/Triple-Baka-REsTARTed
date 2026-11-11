@@ -8,11 +8,13 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
@@ -110,9 +112,11 @@ func Init(ctx context.Context, defaultServiceName string) (func(context.Context)
 
 	var traceOpts []otlptracegrpc.Option
 	var metricOpts []otlpmetricgrpc.Option
+	var logOpts []otlploggrpc.Option
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" {
 		traceOpts = append(traceOpts, otlptracegrpc.WithInsecure())
 		metricOpts = append(metricOpts, otlpmetricgrpc.WithInsecure())
+		logOpts = append(logOpts, otlploggrpc.WithInsecure())
 	}
 
 	traceExporter, err := otlptracegrpc.New(ctx, traceOpts...)
@@ -121,6 +125,11 @@ func Init(ctx context.Context, defaultServiceName string) (func(context.Context)
 	}
 
 	metricExporter, err := otlpmetricgrpc.New(ctx, metricOpts...)
+	if err != nil {
+		return nil, err
+	}
+
+	logExporter, err := otlploggrpc.New(ctx, logOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +146,12 @@ func Init(ctx context.Context, defaultServiceName string) (func(context.Context)
 	)
 	otel.SetMeterProvider(mp)
 
+	lp := sdklog.NewLoggerProvider(
+		sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),
+		sdklog.WithResource(res),
+	)
+	otel.SetLoggerProvider(lp)
+
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
@@ -146,6 +161,7 @@ func Init(ctx context.Context, defaultServiceName string) (func(context.Context)
 		return errors.Join(
 			tp.Shutdown(shutdownCtx),
 			mp.Shutdown(shutdownCtx),
+			lp.Shutdown(shutdownCtx),
 		)
 	}, nil
 }

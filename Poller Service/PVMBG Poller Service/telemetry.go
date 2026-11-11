@@ -8,13 +8,16 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
@@ -25,28 +28,40 @@ const pvmbgPollerScope = "pvmbg-poller"
 
 type contextLogHandler struct {
 	slog.Handler
+	otelHandler slog.Handler
 }
 
 func newContextLogHandler(h slog.Handler) *contextLogHandler {
-	return &contextLogHandler{Handler: h}
+	return &contextLogHandler{
+		Handler:     h,
+		otelHandler: otelslog.NewHandler(pvmbgPollerScope),
+	}
 }
 
 func (h *contextLogHandler) Handle(ctx context.Context, record slog.Record) error {
+	otelRecord := record.Clone()
 	if spanCtx := trace.SpanContextFromContext(ctx); spanCtx.IsValid() {
 		record.AddAttrs(
 			slog.String("trace_id", spanCtx.TraceID().String()),
 			slog.String("span_id", spanCtx.SpanID().String()),
 		)
 	}
+	_ = h.otelHandler.Handle(ctx, otelRecord)
 	return h.Handler.Handle(ctx, record)
 }
 
 func (h *contextLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &contextLogHandler{Handler: h.Handler.WithAttrs(attrs)}
+	return &contextLogHandler{
+		Handler:     h.Handler.WithAttrs(attrs),
+		otelHandler: h.otelHandler.WithAttrs(attrs),
+	}
 }
 
 func (h *contextLogHandler) WithGroup(name string) slog.Handler {
-	return &contextLogHandler{Handler: h.Handler.WithGroup(name)}
+	return &contextLogHandler{
+		Handler:     h.Handler.WithGroup(name),
+		otelHandler: h.otelHandler.WithGroup(name),
+	}
 }
 
 func recordPollCycle(ctx context.Context, status string, durationMs float64) {
@@ -132,9 +147,11 @@ func initTelemetry(ctx context.Context) (func(context.Context) error, error) {
 
 	var traceOpts []otlptracegrpc.Option
 	var metricOpts []otlpmetricgrpc.Option
+	var logOpts []otlploggrpc.Option
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" {
 		traceOpts = append(traceOpts, otlptracegrpc.WithInsecure())
 		metricOpts = append(metricOpts, otlpmetricgrpc.WithInsecure())
+		logOpts = append(logOpts, otlploggrpc.WithInsecure())
 	}
 
 	traceExporter, err := otlptracegrpc.New(ctx, traceOpts...)
@@ -143,6 +160,11 @@ func initTelemetry(ctx context.Context) (func(context.Context) error, error) {
 	}
 
 	metricExporter, err := otlpmetricgrpc.New(ctx, metricOpts...)
+	if err != nil {
+		return nil, err
+	}
+
+	logExporter, err := otlploggrpc.New(ctx, logOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -159,13 +181,19 @@ func initTelemetry(ctx context.Context) (func(context.Context) error, error) {
 	)
 	otel.SetMeterProvider(mp)
 
+	lp := sdklog.NewLoggerProvider(
+		sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),
+		sdklog.WithResource(res),
+	)
+	otel.SetLoggerProvider(lp)
+
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
 
 	return func(shutdownCtx context.Context) error {
-		return errors.Join(tp.Shutdown(shutdownCtx), mp.Shutdown(shutdownCtx))
+		return errors.Join(tp.Shutdown(shutdownCtx), mp.Shutdown(shutdownCtx), lp.Shutdown(shutdownCtx))
 	}, nil
 }
 

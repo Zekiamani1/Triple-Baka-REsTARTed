@@ -7,12 +7,15 @@ import {
   SpanStatusCode,
   type Context,
 } from "@opentelemetry/api";
+import { logs, SeverityNumber, type AnyValueMap } from "@opentelemetry/api-logs";
+import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-grpc";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-grpc";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-grpc";
 import { GrpcInstrumentation } from "@opentelemetry/instrumentation-grpc";
 import { HttpInstrumentation } from "@opentelemetry/instrumentation-http";
 import { MongoDBInstrumentation } from "@opentelemetry/instrumentation-mongodb";
 import { resourceFromAttributes } from "@opentelemetry/resources";
+import { BatchLogRecordProcessor } from "@opentelemetry/sdk-logs";
 import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import {
@@ -38,6 +41,9 @@ export function initTelemetry(): () => Promise<void> {
       exporter: new OTLPMetricExporter(),
       exportIntervalMillis: Number(process.env.OTEL_METRIC_EXPORT_INTERVAL ?? "10000"),
     }),
+    logRecordProcessors: [
+      new BatchLogRecordProcessor({ exporter: new OTLPLogExporter() }),
+    ],
     instrumentations: [
       new GrpcInstrumentation(),
       new MongoDBInstrumentation(),
@@ -54,8 +60,22 @@ export function initTelemetry(): () => Promise<void> {
   };
 }
 
+const SEVERITY_MAP: Record<"INFO" | "WARN" | "ERROR", SeverityNumber> = {
+  INFO: SeverityNumber.INFO,
+  WARN: SeverityNumber.WARN,
+  ERROR: SeverityNumber.ERROR,
+};
+
 function writeLog(level: "INFO" | "WARN" | "ERROR", msg: string, attrs: Record<string, unknown> = {}): void {
-  const spanCtx = trace.getSpan(context.active())?.spanContext();
+  const activeCtx = context.active();
+  const spanCtx = trace.getSpan(activeCtx)?.spanContext();
+  logs.getLogger(SCOPE_NAME).emit({
+    severityNumber: SEVERITY_MAP[level],
+    severityText: level,
+    body: msg,
+    attributes: attrs as AnyValueMap,
+    context: activeCtx,
+  });
   const record: Record<string, unknown> = {
     time: new Date().toISOString(),
     level,
