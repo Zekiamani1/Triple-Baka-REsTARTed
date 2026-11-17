@@ -3,6 +3,8 @@ services:
     image: mongo:8
     ports:
       - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
   kafka-aggregate:
     image: apache/kafka:latest
     ports:
@@ -231,6 +233,7 @@ services:
       - lgtm-data:/data
     restart: unless-stopped
 volumes:
+  mongo-data:
   kafka-data:
   bmkg-data:
   pvmbg-data:
