@@ -19,6 +19,7 @@ spec:
       containers:
         - name: otel-lgtm
           image: grafana/otel-lgtm:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3000
               name: grafana
@@ -32,17 +33,17 @@ spec:
           readinessProbe:
             tcpSocket:
               port: 4317
-            initialDelaySeconds: 10
-            periodSeconds: 5
-            timeoutSeconds: 3
-            failureThreshold: 12
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 20
           livenessProbe:
             tcpSocket:
               port: 3000
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 6
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 10
       volumes:
         - name: lgtm-data
           persistentVolumeClaim:
