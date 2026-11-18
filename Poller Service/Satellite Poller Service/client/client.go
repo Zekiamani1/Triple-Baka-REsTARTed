@@ -1,6 +1,8 @@
 package client
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -118,6 +120,120 @@ func (c *Client) OpenStream(ctx context.Context, from string) (*http.Response, e
 		return nil, fmt.Errorf("unexpected stream content-type: %q", contentType)
 	}
 	return resp, nil
+}
+
+// ReadEvents parses an SSE response body and invokes handle for each complete
+// event. It returns when the stream reaches EOF, the context is cancelled, the
+// stream is malformed/too large, or handle returns an error.
+//
+// A complete SSE event ends with a blank line. An incomplete event at EOF is
+// discarded so a truncated payload is never passed to the processor.
+func (c *Client) ReadEvents(ctx context.Context, body io.Reader, handle func(Event) error) error {
+	if body == nil {
+		return errors.New("body cannot be nil")
+	}
+	if handle == nil {
+		return errors.New("SSE event handler cannot be nil")
+	}
+
+	scanner := bufio.NewScanner(body)
+	initBuf := make([]byte, 0, 64*1024)
+	scanner.Buffer(initBuf, c.maxLineSize)
+	var eventID string
+	var eventType string
+	var data bytes.Buffer
+
+	resetEvent := func() {
+		eventID = ""
+		eventType = ""
+		data.Reset()
+	}
+
+	dispatch := func() error {
+		if data.Len() == 0 {
+			resetEvent()
+			return nil
+		}
+		if eventID == "" {
+			return errors.New("SSE event is missing its id/offset")
+		}
+		if eventType == "" {
+			return errors.New("SSE event is missing its event type")
+		}
+
+		payload := bytes.TrimSuffix(data.Bytes(), []byte("\n"))
+		event := Event{
+			Offset: eventID,
+			Type:   eventType,
+			Data:   append(json.RawMessage(nil), payload...),
+		}
+		if !json.Valid(event.Data) {
+			return fmt.Errorf("SSE event at offset %q contains invalid JSON", event.Offset)
+		}
+		if err := handle(event); err != nil {
+			return fmt.Errorf("handle SSE event at offset %q (%s): %w", event.Offset, event.Type, err)
+		}
+		resetEvent()
+		return nil
+	}
+
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		line := scanner.Text()
+
+		// A blank line terminates one SSE event.
+		if line == "" {
+			if err := dispatch(); err != nil {
+				return err
+			}
+			continue
+		}
+
+		// Comments
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+
+		field, value, found := strings.Cut(line, ":")
+		if !found {
+			value = ""
+		}
+		// The SSE spec removes at most one leading space after the colon.
+		value = strings.TrimPrefix(value, " ")
+
+		switch field {
+		case "id":
+			// Per SSE, an id containing NUL is ignored.
+			if !strings.ContainsRune(value, '\x00') {
+				eventID = value
+			}
+		case "event":
+			eventType = value
+		case "data":
+			data.WriteString(value)
+			data.WriteByte('\n')
+			if data.Len() > c.maxEventSize {
+				return fmt.Errorf("SSE event exceeds maximum size of %d bytes", c.maxEventSize)
+			}
+		case "retry":
+			// Reconnect policy belongs to ingestion.Service. It can be extended
+			// to honor this field if the feed contract requires it.
+		default:
+			// Unknown SSE fields are ignored by the SSE format.
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read satellite SSE stream: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Do not dispatch a non-terminated event: it may be a partial frame caused
+	// by a broken connection. Reconnect from the last durable checkpoint.
+	return io.EOF
 }
 
 func (c *Client) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
