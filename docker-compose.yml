@@ -166,9 +166,13 @@ services:
     ports:
       - "50051:50051"
     env_file: "./Aggregate Service/.env"
+    environment:
+      MONGO_URI: mongodb://mongo-router:27017
+      MONGO_DB_NAME: ${MONGO_DB_NAME:-bnpb}
+      MONGO_COLLECTION: ${MONGO_COLLECTION:-hazard_events}
     depends_on:
-      mongo-aggregate:
-        condition: service_started
+      mongo-cluster-init:
+        condition: service_completed_successfully
       kafka-init:
         condition: service_completed_successfully
       kafka-init-ingest:

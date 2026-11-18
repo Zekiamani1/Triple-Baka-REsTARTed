@@ -13,6 +13,7 @@ import {
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import path from "path";
+import { createHash } from "node:crypto";
 import { MongoClient } from "mongodb";
 import { kafka, mongo, service } from "./config";
 import {
@@ -45,7 +46,12 @@ const healthPackageDefinition = protoLoader.loadSync(
 const proto = grpc.loadPackageDefinition(packageDefinition) as any;
 const healthProto = grpc.loadPackageDefinition(healthPackageDefinition) as any;
 
-const mongoClient = new MongoClient(mongo.uri);
+const mongoClient = new MongoClient(mongo.uri, {
+    retryWrites: true,
+    writeConcern: { w: "majority", journal: true, wtimeoutMS: 10000 },
+    readConcern: { level: "majority" },
+    serverSelectionTimeoutMS: 15000,
+});
 
 let collection: any;
 
@@ -69,7 +75,7 @@ function protoToHazard(protoHazard: any) {
 }
 
 function withoutDeliveryState(document: any): Record<string, unknown> {
-    const { _id, published, published_at, ...hazardEvent } = document;
+    const { _id, partition_key, published, published_at, ...hazardEvent } = document;
     return hazardEvent;
 }
 
@@ -111,7 +117,15 @@ async function ingestHazard(hazardEvent: any): Promise<void> {
                     ingested_at: toDate(hazardEvent.ingested_at),
                     attributes: toStruct(hazardEvent.attributes),
                 };
+                if (typeof hazardEvent.source !== "string" || !hazardEvent.source.trim() ||
+                    typeof hazardEvent.source_ref_id !== "string" || !hazardEvent.source_ref_id.trim()) {
+                    throw new Error("source and source_ref_id must be non-empty strings");
+                }
                 const identity = {
+                    // Matches the pre-split hash ranges configured by init-cluster.js.
+                    partition_key: createHash("sha256")
+                        .update(JSON.stringify([hazardEvent.source, hazardEvent.source_ref_id]))
+                        .digest("hex"),
                     source: hazardEvent.source,
                     source_ref_id: hazardEvent.source_ref_id,
                 };
@@ -120,7 +134,7 @@ async function ingestHazard(hazardEvent: any): Promise<void> {
 
                 try {
                     await trackMongoOp("insertOne", () =>
-                        collection.insertOne({ ...hazardEvent, published: false }),
+                        collection.insertOne({ ...hazardEvent, ...identity, published: false }),
                     );
                 } catch (error: any) {
                     if (error?.code !== 11000) {
@@ -273,9 +287,9 @@ async function listHazards(call: grpc.ServerUnaryCall<any, any>, callback: grpc.
                 const [hazards, total] = await Promise.all([
                     trackMongoOp("find", () =>
                         collection.find(filter, {
-                            projection: { _id: 0, published: 0, published_at: 0 }
+                            projection: { _id: 0, partition_key: 0, published: 0, published_at: 0 }
                         })
-                        .sort({ ingested_at: -1 })
+                        .sort({ ingested_at: -1, source: 1, source_ref_id: 1 })
                         .skip(offset)
                         .limit(limit)
                         .toArray()
@@ -350,7 +364,7 @@ async function getHazard(call: grpc.ServerUnaryCall<any, any>, callback: grpc.se
                 const hazardEvent = await trackMongoOp("findOne", () =>
                     collection.findOne(
                         { hazard_id: hazardId },
-                        { projection: { _id: 0, published: 0, published_at: 0 } },
+                        { projection: { _id: 0, partition_key: 0, published: 0, published_at: 0 } },
                     ),
                 );
 
@@ -400,7 +414,7 @@ async function main () {
 
     const db = mongoClient.db(mongo.dbName);
     collection = db.collection(mongo.collection);
-    await collection.createIndex({ source: 1, source_ref_id: 1 }, { unique: true });
+    await collection.createIndex({ partition_key: 1, source: 1, source_ref_id: 1 }, { unique: true });
     await collection.createIndex({ hazard_id: 1 });
 
     await connectKafka();
