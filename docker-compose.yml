@@ -158,16 +158,22 @@ services:
       - --topic
       - hazard-ingest
       - --partitions
-      - "1"
+      - "12"
       - --replication-factor
       - "1"
   aggregate:
     build: "./Aggregate Service"
-    ports:
-      - "50051:50051"
+    expose:
+      - "50051"
+    deploy:
+      replicas: 3
+    init: true
+    stop_grace_period: 40s
     env_file: "./Aggregate Service/.env"
     environment:
       MONGO_URI: mongodb://mongo-router:27017
+      AGGREGATOR_PORT: "50051"
+      KAFKA_CONSUMER_GROUP: aggregate-ingestion
       MONGO_DB_NAME: ${MONGO_DB_NAME:-bnpb}
       MONGO_COLLECTION: ${MONGO_COLLECTION:-hazard_events}
     depends_on:
@@ -178,7 +184,7 @@ services:
       kafka-init-ingest:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "grpcurl -plaintext -proto /app/health.proto -d '{\"service\":\"\"}' localhost:$${AGGREGATOR_PORT} grpc.health.v1.Health/Check | grep -q SERVING"]
+      test: ["CMD-SHELL", "grpcurl -plaintext -proto /app/health.proto -d '{\"service\":\"\"}' localhost:$${AGGREGATOR_PORT} grpc.health.v1.Health/Check | grep -q '\"SERVING\"'"]
       interval: 5s
       timeout: 3s
       retries: 10
