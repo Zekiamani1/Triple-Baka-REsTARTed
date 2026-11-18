@@ -20,6 +20,7 @@ spec:
       containers:
         - name: kafka-aggregate
           image: apache/kafka:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 29092
               name: internal
@@ -34,23 +35,17 @@ spec:
             - name: kafka-data
               mountPath: /var/lib/kafka/data
           readinessProbe:
-            exec:
-              command:
-                - /bin/sh
-                - -c
-                - /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1
+            tcpSocket:
+              port: 29092
             initialDelaySeconds: 10
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 20
           livenessProbe:
-            exec:
-              command:
-                - /bin/sh
-                - -c
-                - /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1
-            initialDelaySeconds: 30
-            periodSeconds: 10
+            tcpSocket:
+              port: 29092
+            initialDelaySeconds: 60
+            periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 6
       volumes:
@@ -75,6 +70,7 @@ spec:
       containers:
         - name: kafka-init
           image: apache/kafka:latest
+          imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
             - -c
@@ -117,15 +113,15 @@ spec:
               port: 50051
             initialDelaySeconds: 5
             periodSeconds: 5
-            timeoutSeconds: 3
-            failureThreshold: 12
+            timeoutSeconds: 5
+            failureThreshold: 20
           livenessProbe:
             grpc:
               port: 50051
-            initialDelaySeconds: 20
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 6
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -392,6 +388,7 @@ spec:
       containers:
         - name: gateway
           image: envoyproxy/envoy:v1.31-latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
               name: http
@@ -412,16 +409,16 @@ spec:
               readOnly: true
           readinessProbe:
             httpGet:
-              path: /health
-              port: 8080
+              path: /ready
+              port: 9901
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 12
           livenessProbe:
             httpGet:
-              path: /health
-              port: 8080
+              path: /ready
+              port: 9901
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 3
