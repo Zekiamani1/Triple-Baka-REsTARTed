@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -24,7 +26,6 @@ type Client struct {
 type Session map[string]json.RawMessage
 
 type HTTPError struct {
-	error
 	StatusCode int
 	Body       string
 	RetryAfter string
@@ -102,22 +103,44 @@ func (c *Client) OpenStream(ctx context.Context, from string) (*http.Response, e
 	if strings.TrimSpace(from) == "" {
 		return nil, errors.New("stream starting offset is required")
 	}
-	req, err := c.newRequest(ctx, http.MethodGet, "/v1/stream?from="+url.QueryEscape(from), nil)
+	req, err := c.newRequest(ctx, http.MethodGet, "/v1/stream", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+	query := req.URL.Query()
+	query.Set("from", from)
+	req.URL.RawQuery = query.Encode()
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		defer resp.Body.Close()
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+
 		return nil, fmt.Errorf("failed to perform request: %w", err)
 	}
+	if resp == nil {
+		return nil, errors.New("received nil response from HTTP client")
+	}
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		return nil, c.newHTTPError(resp)
+	}
 
-	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-	if !strings.HasPrefix(contentType, "event-stream") {
-		defer resp.Body.Close()
-		return nil, fmt.Errorf("unexpected stream content-type: %q", contentType)
+	mediaType, _, err := mime.ParseMediaType(
+		resp.Header.Get("Content-Type"),
+	)
+
+	if err != nil ||
+		!strings.EqualFold(mediaType, "text/event-stream") {
+
+		_ = resp.Body.Close()
+
+		return nil, fmt.Errorf(
+			"unexpected stream content-type: %q",
+			resp.Header.Get("Content-Type"),
+		)
 	}
 	return resp, nil
 }
@@ -247,6 +270,25 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body io.Re
 	return req, nil
 }
 
+func (e *HTTPError) Error() string {
+	if e == nil {
+		return "unknown satellite HTTP error"
+	}
+
+	if e.Body == "" {
+		return fmt.Sprintf(
+			"satellite feed returned HTTP %d",
+			e.StatusCode,
+		)
+	}
+
+	return fmt.Sprintf(
+		"satellite feed returned HTTP %d: %s",
+		e.StatusCode,
+		e.Body,
+	)
+}
+
 func (c *Client) newHTTPError(resp *http.Response) error {
 	const maxErrorBodySize = 16 * 1024
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
@@ -255,4 +297,38 @@ func (c *Client) newHTTPError(resp *http.Response) error {
 		Body:       strings.TrimSpace(string(body)),
 		RetryAfter: resp.Header.Get("Retry-After"),
 	}
+}
+
+func (s Session) LatestOffset() (int64, error) {
+	raw, ok := s["latest_offset"]
+	if !ok {
+		return 0, errors.New("session is missing latest_offset")
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return 0, fmt.Errorf("decode latest_offset: %w", err)
+	}
+
+	var text string
+	switch v := value.(type) {
+	case json.Number:
+		text = v.String()
+	case string:
+		text = v
+	default:
+		return 0, fmt.Errorf(
+			"latest_offset must be a string or integer, got %T", value,
+		)
+	}
+
+	offset, err := strconv.ParseInt(text, 10, 64)
+	if err != nil || offset < 0 {
+		return 0, fmt.Errorf("invalid latest_offset %q", text)
+	}
+
+	return offset, nil
 }
