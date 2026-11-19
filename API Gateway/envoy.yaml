@@ -70,7 +70,12 @@ static_resources:
                         - match: { prefix: "/.well-known/jwks.json"}
                           route: { cluster: auth_service }
                         - match: { prefix: "/aggregate/"}
-                          route: { cluster: aggregator_service }
+                          route:
+                            cluster: aggregator_service
+                            retry_policy:
+                              retry_on: connect-failure,refused-stream,unavailable,reset,5xx
+                              num_retries: 3
+                              per_try_timeout: 5s
                           typed_per_filter_config:
                             envoy.filters.http.jwt_authn:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
