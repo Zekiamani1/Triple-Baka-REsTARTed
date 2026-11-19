@@ -2,18 +2,26 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/segmentio/kafka-go"
+	"io"
+	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
-	"log/slog"
+	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
+	"satellitepoller/client"
 	"satellitepoller/domain"
+	"satellitepoller/processing"
+	"satellitepoller/storage"
 )
 
 const (
@@ -24,6 +32,10 @@ const (
 	DefaultKafkaBrokers           = "kafka-aggregate:29092"
 	DefaultKafkaTopicHazardIngest = "hazard-ingest"
 	DefaultHealthPort             = "8085"
+	defaultBatchSize              = 100
+	defaultPollInterval           = time.Second
+	startupTimeout                = 15 * time.Second
+	shutdownTimeout               = 10 * time.Second
 )
 
 type Config struct {
@@ -36,12 +48,6 @@ type Config struct {
 	KafkaTopicHazardIngest string
 	HealthPort             string
 }
-
-
-const (
-	defaultBatchSize    = 100
-	defaultPollInterval = time.Second
-)
 
 // OutboxRepository is the subset of storage.Repository used by the publisher.
 type OutboxRepository interface {
@@ -65,6 +71,175 @@ type Encoder interface {
 // OutboxJSONEncoder publishes the JSON OutboxEnvelope created by processing.
 // It preserves operation, source_ref_id, revision, hazard, and reason fields.
 type OutboxJSONEncoder struct{}
+
+func main() {
+	if err := run(); err != nil {
+		slog.Error("satellite poller stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	slog.SetDefault(logger)
+
+	cfg, err := Load()
+	if err != nil {
+		return fmt.Errorf("load configuration: %w", err)
+	}
+
+	// Use the signal context for startup as well as normal operation.
+	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	startupCtx, cancelStartup := context.WithTimeout(rootCtx, startupTimeout)
+	db, err := storage.Open(startupCtx, cfg.SQLiteDBPath)
+	cancelStartup()
+	if err != nil {
+		return fmt.Errorf("open SQLite storage: %w", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			logger.Warn("close SQLite database", "error", err)
+		}
+	}()
+
+	repo, err := storage.NewRepository(db)
+	if err != nil {
+		return fmt.Errorf("create storage repository: %w", err)
+	}
+
+	feedClient, err := client.NewClient(cfg.SatelliteBaseURL, cfg.SatelliteGroupToken, nil)
+	if err != nil {
+		return fmt.Errorf("create satellite feed client: %w", err)
+	}
+
+	ingestionService, err := client.NewService(feedClient, repo, client.Options{
+		ReconnectDelay: cfg.ReconnectDelay,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("create ingestion service: %w", err)
+	}
+
+	processor, err := processing.NewProcessor(
+		repo,
+		processing.Options{
+			MaxLateness: cfg.MaxLateness,
+			Logger:      logger,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create processing service: %w", err)
+	}
+	kafkaPublisher, err := NewKafkaPublisher(
+		cfg.KafkaBrokers,
+		cfg.KafkaTopicHazardIngest,
+		repo,
+		Options{
+			Logger:  logger,
+			Encoder: OutboxJSONEncoder{},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create Kafka publisher: %w", err)
+	}
+	defer func() {
+		if err := kafkaPublisher.Close(); err != nil {
+			logger.Warn("close Kafka writer", "error", err)
+		}
+	}()
+
+	healthServer := newHealthServer(cfg.HealthPort, db)
+	workerCtx, cancelWorkers := context.WithCancel(rootCtx)
+	defer cancelWorkers()
+
+	// Three independent loops share the service-owned SQLite repository:
+	// - ingestion persists raw SSE events
+	// - processing creates outbox records
+	// - publisher sends those records to Kafka
+	type component struct {
+		name string
+		run  func(context.Context) error
+	}
+	components := []component{
+		{name: "ingestion", run: ingestionService.Run},
+		{name: "processing", run: processor.Run},
+		{name: "kafka-publisher", run: kafkaPublisher.Run},
+	}
+
+	errCh := make(chan error, len(components)+1)
+	var wg sync.WaitGroup
+	for _, item := range components {
+		item := item
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := item.run(workerCtx); err != nil {
+				if workerCtx.Err() == nil {
+					errCh <- fmt.Errorf("%s worker: %w", item.name, err)
+				}
+				return
+			}
+			if workerCtx.Err() == nil {
+				errCh <- fmt.Errorf("%s worker stopped unexpectedly", item.name)
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logger.Info("health server listening", "address", healthServer.Addr)
+		if err := healthServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- fmt.Errorf("health server: %w", err)
+		}
+	}()
+
+	logger.Info("satellite poller started",
+		"sqlite_path", cfg.SQLiteDBPath,
+		"kafka_brokers", cfg.KafkaBrokers,
+		"kafka_topic", cfg.KafkaTopicHazardIngest,
+		"max_lateness", cfg.MaxLateness,
+	)
+
+	var runErr error
+	select {
+	case <-rootCtx.Done():
+		logger.Info("shutdown signal received")
+	case err := <-errCh:
+		runErr = err
+		logger.Error("component failed; shutting down", "error", err)
+	}
+
+	cancelWorkers()
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancelShutdown()
+	if err := healthServer.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("graceful health server shutdown failed", "error", err)
+		_ = healthServer.Close()
+	}
+
+	workersDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(workersDone)
+	}()
+
+	select {
+	case <-workersDone:
+	case <-shutdownCtx.Done():
+		logger.Warn("shutdown deadline reached; forcing health server close")
+		_ = healthServer.Close()
+		<-workersDone
+	}
+
+	logger.Info("satellite poller stopped")
+	return runErr
+}
 
 // Load reads and validates application configuration
 // from environment variables.
@@ -388,5 +563,34 @@ func (p *Publisher) recordBatchFailure(ctx context.Context, events []domain.Outb
 				"error", err,
 			)
 		}
+	}
+}
+
+func newHealthServer(port string, db interface{ PingContext(context.Context) error }) *http.Server {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/health/live", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok\n")
+	})
+
+	mux.HandleFunc("/health/ready", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+		if err := db.PingContext(ctx); err != nil {
+			http.Error(w, "storage unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ready\n")
+	})
+
+	return &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       30 * time.Second,
 	}
 }
