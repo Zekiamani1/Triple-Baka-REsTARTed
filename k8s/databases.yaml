@@ -81,6 +81,7 @@ metadata:
   labels:
     app: mongo-cluster-init
 spec:
+  ttlSecondsAfterFinished: 60
   template:
     metadata:
       labels:
