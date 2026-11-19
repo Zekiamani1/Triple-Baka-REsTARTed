@@ -32,6 +32,18 @@ spec:
     enabled: true
     configsvrReplSet:
       size: 3
+      configuration: |
+        storage:
+          wiredTiger:
+            engineConfig:
+              cacheSizeGB: 0.25
+      livenessProbe:
+        timeoutSeconds: 15
+        failureThreshold: 10
+      readinessProbe:
+        periodSeconds: 10
+        timeoutSeconds: 15
+        failureThreshold: 10
       affinity:
         antiAffinityTopologyKey: "none"
       expose:
@@ -44,6 +56,13 @@ spec:
               storage: 1Gi
     mongos:
       size: 2
+      livenessProbe:
+        timeoutSeconds: 15
+        failureThreshold: 10
+      readinessProbe:
+        periodSeconds: 10
+        timeoutSeconds: 15
+        failureThreshold: 10
       affinity:
         antiAffinityTopologyKey: "none"
       expose:
@@ -51,6 +70,18 @@ spec:
   replsets:
     - name: shard1
       size: 3
+      configuration: |
+        storage:
+          wiredTiger:
+            engineConfig:
+              cacheSizeGB: 0.25
+      livenessProbe:
+        timeoutSeconds: 15
+        failureThreshold: 10
+      readinessProbe:
+        periodSeconds: 10
+        timeoutSeconds: 15
+        failureThreshold: 10
       affinity:
         antiAffinityTopologyKey: "none"
       expose:
@@ -63,6 +94,18 @@ spec:
               storage: 1Gi
     - name: shard2
       size: 3
+      configuration: |
+        storage:
+          wiredTiger:
+            engineConfig:
+              cacheSizeGB: 0.25
+      livenessProbe:
+        timeoutSeconds: 15
+        failureThreshold: 10
+      readinessProbe:
+        periodSeconds: 10
+        timeoutSeconds: 15
+        failureThreshold: 10
       affinity:
         antiAffinityTopologyKey: "none"
       expose:
