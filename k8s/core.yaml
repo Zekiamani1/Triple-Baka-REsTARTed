@@ -80,7 +80,8 @@ spec:
                 sleep 3
               done
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-events --partitions 1 --replication-factor 1
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-ingest --partitions 1 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-ingest --partitions 12 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --alter --topic hazard-ingest --partitions 12 >/dev/null 2>&1 || true
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -89,7 +90,7 @@ metadata:
   labels:
     app: aggregate
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: aggregate
@@ -98,6 +99,7 @@ spec:
       labels:
         app: aggregate
     spec:
+      terminationGracePeriodSeconds: 40
       initContainers:
         - name: wait-for-mongo
           image: percona/percona-server-mongodb:8.0.4-1-multi
