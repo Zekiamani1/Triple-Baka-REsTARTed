@@ -1,15 +1,17 @@
 import {
+  initTelemetry,
   logError,
   logInfo,
   recordGrpcRequest,
   recordIngestEvent,
   recordMongoOp,
   SCOPE_NAME,
-  shutdownTelemetry,
   SpanKind,
   SpanStatusCode,
   trace,
 } from "./telemetry";
+
+const shutdownTelemetry = initTelemetry();
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import path from "path";

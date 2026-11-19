@@ -3,6 +3,8 @@ services:
     image: mongo:8
     ports:
       - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
 
   mongo-config:
     image: mongo:8
@@ -329,10 +331,21 @@ services:
     depends_on:
       auth-service:
         condition: service_healthy
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    container_name: otel-lgtm
+    ports:
+      - "3000:3000"   # Grafana UI (admin / admin)
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+    volumes:
+      - lgtm-data:/data
+    restart: unless-stopped
 volumes:
   mongo-config-data:
   mongo-shard-1-data:
   mongo-shard-2-data:
+  mongo-data:
   kafka-data:
   bmkg-data:
   pvmbg-data:
@@ -344,3 +357,4 @@ volumes:
   mongo-shard-2-replica-3-data:
   mongo-config-2-data:
   mongo-config-3-data:
+  lgtm-data:

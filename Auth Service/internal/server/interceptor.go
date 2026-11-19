@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"auth-service/internal/telemetry"
+	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otelcodes "go.opentelemetry.io/otel/codes"
@@ -155,26 +156,38 @@ func Logging() grpc.UnaryServerInterceptor {
 
 type ContextHandler struct {
 	slog.Handler
+	otelHandler slog.Handler
 }
 
 func NewContextHandler(handler slog.Handler) *ContextHandler {
-	return &ContextHandler{Handler: handler}
+	return &ContextHandler{
+		Handler:     handler,
+		otelHandler: otelslog.NewHandler(telemetry.ScopeName),
+	}
 }
 func (h *ContextHandler) Handle(ctx context.Context, record slog.Record) error {
 	if id := CorrelationID(ctx); id != "" {
 		record.AddAttrs(slog.String("correlation_id", id))
 	}
+	otelRecord := record.Clone()
 	if spanCtx := trace.SpanContextFromContext(ctx); spanCtx.IsValid() {
 		record.AddAttrs(
 			slog.String("trace_id", spanCtx.TraceID().String()),
 			slog.String("span_id", spanCtx.SpanID().String()),
 		)
 	}
+	_ = h.otelHandler.Handle(ctx, otelRecord)
 	return h.Handler.Handle(ctx, record)
 }
 func (h *ContextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &ContextHandler{Handler: h.Handler.WithAttrs(attrs)}
+	return &ContextHandler{
+		Handler:     h.Handler.WithAttrs(attrs),
+		otelHandler: h.otelHandler.WithAttrs(attrs),
+	}
 }
 func (h *ContextHandler) WithGroup(name string) slog.Handler {
-	return &ContextHandler{Handler: h.Handler.WithGroup(name)}
+	return &ContextHandler{
+		Handler:     h.Handler.WithGroup(name),
+		otelHandler: h.otelHandler.WithGroup(name),
+	}
 }

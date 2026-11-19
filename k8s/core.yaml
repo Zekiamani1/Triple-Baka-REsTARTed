@@ -1,0 +1,429 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-aggregate
+  labels:
+    app: kafka-aggregate
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kafka-aggregate
+  template:
+    metadata:
+      labels:
+        app: kafka-aggregate
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: kafka-aggregate
+          image: apache/kafka:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 29092
+              name: internal
+            - containerPort: 9092
+              name: external
+            - containerPort: 9093
+              name: controller
+          envFrom:
+            - configMapRef:
+                name: kafka-env
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /var/lib/kafka/data
+          readinessProbe:
+            tcpSocket:
+              port: 29092
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 20
+          livenessProbe:
+            tcpSocket:
+              port: 29092
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+      volumes:
+        - name: kafka-data
+          persistentVolumeClaim:
+            claimName: kafka-data
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-init
+  labels:
+    app: kafka-init
+spec:
+  template:
+    metadata:
+      labels:
+        app: kafka-init
+    spec:
+      enableServiceLinks: false
+      restartPolicy: OnFailure
+      containers:
+        - name: kafka-init
+          image: apache/kafka:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --list >/dev/null 2>&1; do
+                echo "Waiting for kafka-aggregate:29092..."
+                sleep 3
+              done
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-events --partitions 1 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-ingest --partitions 1 --replication-factor 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aggregate
+  labels:
+    app: aggregate
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aggregate
+  template:
+    metadata:
+      labels:
+        app: aggregate
+    spec:
+      containers:
+        - name: aggregate
+          image: aat-aggregate:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50051
+              name: grpc
+          envFrom:
+            - configMapRef:
+                name: aggregate-env
+          readinessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 20
+          livenessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 10
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bmkg-poller
+  labels:
+    app: bmkg-poller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bmkg-poller
+  template:
+    metadata:
+      labels:
+        app: bmkg-poller
+    spec:
+      containers:
+        - name: bmkg-poller
+          image: aat-bmkg-poller:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8085
+              name: health
+          envFrom:
+            - secretRef:
+                name: bmkg-poller-env
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8085
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8085
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pvmbg-poller
+  labels:
+    app: pvmbg-poller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pvmbg-poller
+  template:
+    metadata:
+      labels:
+        app: pvmbg-poller
+    spec:
+      containers:
+        - name: pvmbg-poller
+          image: aat-pvmbg-poller:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8086
+              name: health
+          envFrom:
+            - secretRef:
+                name: pvmbg-poller-env
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8086
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8086
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: event-consumer
+  labels:
+    app: event-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: event-consumer
+  template:
+    metadata:
+      labels:
+        app: event-consumer
+    spec:
+      containers:
+        - name: event-consumer
+          image: aat-event-consumer:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8087
+              name: health
+          envFrom:
+            - configMapRef:
+                name: event-consumer-env
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8087
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8087
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-consumer
+  labels:
+    app: alert-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alert-consumer
+  template:
+    metadata:
+      labels:
+        app: alert-consumer
+    spec:
+      containers:
+        - name: alert-consumer
+          image: aat-alert-consumer:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8088
+              name: health
+          envFrom:
+            - configMapRef:
+                name: alert-consumer-env
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8088
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8088
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+  labels:
+    app: auth-service
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: auth-service
+  template:
+    metadata:
+      labels:
+        app: auth-service
+    spec:
+      initContainers:
+        - name: auth-keygen
+          image: auth-service:dev
+          imagePullPolicy: IfNotPresent
+          command:
+            - ./auth-service
+            - keygen
+          envFrom:
+            - secretRef:
+                name: auth-env
+          volumeMounts:
+            - name: auth-keys
+              mountPath: /app/keys
+        - name: auth-seed
+          image: auth-service:dev
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - until ./seed; do echo 'waiting for auth-db...'; sleep 2; done
+          envFrom:
+            - secretRef:
+                name: auth-env
+      containers:
+        - name: auth-service
+          image: auth-service:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8083
+              name: grpc
+          envFrom:
+            - secretRef:
+                name: auth-env
+          volumeMounts:
+            - name: auth-keys
+              mountPath: /app/keys
+              readOnly: true
+          readinessProbe:
+            grpc:
+              port: 8083
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            grpc:
+              port: 8083
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+      volumes:
+        - name: auth-keys
+          persistentVolumeClaim:
+            claimName: auth-keys
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels:
+    app: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      containers:
+        - name: gateway
+          image: envoyproxy/envoy:v1.31-latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 9901
+              name: admin
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /etc/envoy/envoy.yaml
+              subPath: envoy.yaml
+              readOnly: true
+            - name: gateway-config
+              mountPath: /etc/envoy/descriptors/api.pb
+              subPath: api.pb
+              readOnly: true
+            - name: gateway-config
+              mountPath: /etc/envoy/lua/field_filter.lua
+              subPath: field_filter.lua
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 9901
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 9901
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+      volumes:
+        - name: gateway-config
+          configMap:
+            name: gateway-config

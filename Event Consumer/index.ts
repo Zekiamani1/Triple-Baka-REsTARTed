@@ -1,14 +1,16 @@
 import {
   extractContextFromKafkaHeaders,
+  initTelemetry,
   logError,
   logInfo,
   recordMessageConsumed,
   SCOPE_NAME,
-  shutdownTelemetry,
   SpanKind,
   SpanStatusCode,
   trace,
 } from "./telemetry";
+
+const shutdownTelemetry = initTelemetry();
 import { Kafka } from "kafkajs";
 import { createServer } from "node:http";
 import { kafkaConfig } from "./config";
