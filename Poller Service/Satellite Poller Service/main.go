@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/segmentio/kafka-go"
+	"google.golang.org/protobuf/encoding/protojson"
 	"io"
 	"log/slog"
 	"net/http"
@@ -67,10 +68,6 @@ type KafkaWriter interface {
 type Encoder interface {
 	Encode(event domain.OutboxEvent) ([]byte, error)
 }
-
-// OutboxJSONEncoder publishes the JSON OutboxEnvelope created by processing.
-// It preserves operation, source_ref_id, revision, hazard, and reason fields.
-type OutboxJSONEncoder struct{}
 
 func main() {
 	if err := run(); err != nil {
@@ -158,7 +155,7 @@ func run() error {
 		repo,
 		Options{
 			Logger:  logger,
-			Encoder: OutboxJSONEncoder{},
+			Encoder: HazardProtoJSONEncoder{},
 		},
 	)
 	if err != nil {
@@ -400,13 +397,6 @@ func csvEnvOrDefault(key, fallback string) []string {
 	return parts
 }
 
-func (OutboxJSONEncoder) Encode(event domain.OutboxEvent) ([]byte, error) {
-	if len(event.Payload) == 0 || !json.Valid(event.Payload) {
-		return nil, fmt.Errorf("outbox event %q contains invalid JSON", event.EventID)
-	}
-	return append([]byte(nil), event.Payload...), nil
-}
-
 // Options configures batching and retry polling.
 type Options struct {
 	BatchSize    int
@@ -462,7 +452,7 @@ func NewKafkaPublisher(
 		opts.Logger = slog.Default()
 	}
 	if opts.Encoder == nil {
-		opts.Encoder = OutboxJSONEncoder{}
+		opts.Encoder = HazardProtoJSONEncoder{}
 	}
 
 	writer := opts.Writer
@@ -590,6 +580,45 @@ func (p *Publisher) recordBatchFailure(ctx context.Context, events []domain.Outb
 			)
 		}
 	}
+}
+
+type HazardProtoJSONEncoder struct{}
+
+func (HazardProtoJSONEncoder) Encode(
+	event domain.OutboxEvent,
+) ([]byte, error) {
+
+	var envelope processing.OutboxEnvelope
+
+	if err := json.Unmarshal(event.Payload, &envelope); err != nil {
+		return nil, fmt.Errorf("decode outbox envelope: %w", err)
+	}
+
+	if envelope.Operation != "upsert" {
+		return nil, fmt.Errorf(
+			"unsupported Kafka operation: %s",
+			envelope.Operation,
+		)
+	}
+
+	if envelope.Hazard == nil {
+		return nil, fmt.Errorf("upsert envelope has no hazard")
+	}
+
+	hazard, err := toProtoHazard(*envelope.Hazard)
+	if err != nil {
+		return nil, err
+	}
+
+	payload, err := protojson.MarshalOptions{
+		UseProtoNames: true,
+	}.Marshal(hazard)
+
+	if err != nil {
+		return nil, fmt.Errorf("marshal Protobuf JSON: %w", err)
+	}
+
+	return payload, nil
 }
 
 func newHealthServer(port string, db interface{ PingContext(context.Context) error }) *http.Server {
