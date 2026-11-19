@@ -8,13 +8,13 @@ BNPB periodically polls both sources and maps the retrieved data into a standard
 
 ## Requirements
 
-- Docker Engine
-- Docker Compose v2
-- Optional: `curl` and `jq` for trying the API
+- **Docker Compose:** Docker Engine and Docker Compose v2
+- **Kubernetes:** A Kubernetes Distributions, `kubectl`, and `helm`
+- **Optional:** `curl` and `jq` for trying the API
 
 ## Run locally
 
-Create local environment files from the provided examples:
+Create local environment files from the provided examples (required by both Docker Compose and Kubernetes):
 
 ```bash
 cp 'Aggregate Service/.env.example' 'Aggregate Service/.env'
@@ -31,6 +31,8 @@ Set the client secrets and source API keys in those `.env` files. The BMKG API
 key must match the key configured in BMKG Poller; the PVMBG API key must match
 the key configured in PVMBG Poller.
 
+### Option 1: Run with Docker Compose
+
 Build and run:
 
 ```bash
@@ -41,6 +43,45 @@ Stop program:
 
 ```bash
 docker compose down
+```
+
+### Option 2: Run with Kubernetes
+
+1. **Install the Percona Operator for MongoDB**:
+
+```bash
+helm repo add percona https://percona.github.io/percona-helm-charts/
+helm repo update
+helm install psmdb-operator percona/psmdb-operator --version 1.19.0 --set watchAllNamespaces=true
+```
+
+2. **Build the local service images**:
+
+```bash
+docker compose build
+```
+
+3. **Deploy all manifests with Kustomize:**
+
+```bash
+kubectl apply -k .
+```
+
+4. **Access the services:**
+
+- **API Gateway:** NodePort `30080`, or forward to `localhost:8080`:
+  ```bash
+  kubectl port-forward svc/gateway 8080:8080
+  ```
+- **Grafana (Observability):** NodePort `30300`, or forward to `localhost:3000`:
+  ```bash
+  kubectl port-forward svc/otel-lgtm 3000:3000
+  ```
+
+5. **Stop / remove the deployment:**
+
+```bash
+kubectl delete -k .
 ```
 
 ## Client API
