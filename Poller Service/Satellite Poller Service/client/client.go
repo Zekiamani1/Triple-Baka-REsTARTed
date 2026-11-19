@@ -31,9 +31,9 @@ type HTTPError struct {
 }
 
 type Event struct {
-	Offset string
-	Type   string
-	Data   json.RawMessage
+	Offset string          `json:"offset"`
+	Type   string          `json:"type"`
+	Data   json.RawMessage `json:"data"`
 }
 
 func NewClient(baseURL, groupToken string, httpClient *http.Client) (*Client, error) {
