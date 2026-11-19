@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 	"time"
@@ -24,11 +23,7 @@ type OutboxEnvelope struct {
 	Reason      string              `json:"reason,omitempty"`
 }
 
-func BuildHazardEvent(cluster domain.FireCluster, provinces []ProvinceReference, now time.Time) (domain.HazardEvent, error) {
-	area, err := nearestProvince(cluster.Latitude, cluster.Longitude, provinces)
-	if err != nil {
-		return domain.HazardEvent{}, err
-	}
+func BuildHazardEvent(cluster domain.FireCluster, now time.Time) (domain.HazardEvent, error) {
 	keys := append([]string(nil), cluster.DetectionKeys...)
 	sort.Strings(keys)
 	satellites := append([]string(nil), cluster.Satellites...)
@@ -49,7 +44,6 @@ func BuildHazardEvent(cluster domain.FireCluster, provinces []ProvinceReference,
 		SourceRefID: cluster.SourceRefID,
 		HazardType:  "WILDFIRE",
 		Severity:    cluster.Severity,
-		AreaName:    area,
 		Latitude:    cluster.Latitude,
 		Longitude:   cluster.Longitude,
 		OccurredAt:  cluster.OccurredAt.UTC(),
@@ -68,7 +62,7 @@ func BuildHazardEvent(cluster domain.FireCluster, provinces []ProvinceReference,
 // clusters. It preserves an existing cluster ID when its deterministic anchor
 // remains part of that component, increments revision only when content changes,
 // and creates retract envelopes for clusters that disappeared or were superseded.
-func ReconcileClusters(oldClusters, computed []domain.FireCluster, provinces []ProvinceReference, now time.Time) ([]domain.FireCluster, []domain.OutboxEvent, error) {
+func ReconcileClusters(oldClusters, computed []domain.FireCluster, now time.Time) ([]domain.FireCluster, []domain.OutboxEvent, error) {
 	now = now.UTC()
 	oldActive := make(map[string]domain.FireCluster)
 	allByID := make(map[string]domain.FireCluster)
@@ -92,7 +86,7 @@ func ReconcileClusters(oldClusters, computed []domain.FireCluster, provinces []P
 			cluster.Revision = previous.Revision
 			if !sameClusterContent(previous, cluster) {
 				cluster.Revision++
-				payload, err := makeOutboxPayload("upsert", cluster, provinces, now, "")
+				payload, err := makeOutboxPayload("upsert", cluster, now, "")
 				if err != nil {
 					return nil, nil, err
 				}
@@ -107,7 +101,7 @@ func ReconcileClusters(oldClusters, computed []domain.FireCluster, provinces []P
 			} else {
 				cluster.Revision = 1
 			}
-			payload, err := makeOutboxPayload("upsert", cluster, provinces, now, "")
+			payload, err := makeOutboxPayload("upsert", cluster, now, "")
 			if err != nil {
 				return nil, nil, err
 			}
@@ -166,8 +160,8 @@ func ReconcileClusters(oldClusters, computed []domain.FireCluster, provinces []P
 	return out, outbox, nil
 }
 
-func makeOutboxPayload(operation string, cluster domain.FireCluster, provinces []ProvinceReference, now time.Time, reason string) ([]byte, error) {
-	hazard, err := BuildHazardEvent(cluster, provinces, now)
+func makeOutboxPayload(operation string, cluster domain.FireCluster, now time.Time, reason string) ([]byte, error) {
+	hazard, err := BuildHazardEvent(cluster, now)
 	if err != nil {
 		return nil, err
 	}
@@ -266,22 +260,4 @@ func confidenceRank(value string) int {
 
 func isLowConfidence(value string) bool {
 	return strings.EqualFold(strings.TrimSpace(value), "low") || strings.EqualFold(strings.TrimSpace(value), "l")
-}
-
-func nearestProvince(latitude, longitude float64, provinces []ProvinceReference) (string, error) {
-	if len(provinces) == 0 {
-		return "", ErrProvinceReferenceMissing
-	}
-	bestName := ""
-	bestDistance := math.Inf(1)
-	for _, province := range provinces {
-		distance := haversineKM(latitude, longitude, province.Latitude, province.Longitude)
-		if distance < bestDistance {
-			bestDistance, bestName = distance, province.Name
-		}
-	}
-	if strings.TrimSpace(bestName) == "" {
-		return "", ErrProvinceReferenceMissing
-	}
-	return bestName, nil
 }

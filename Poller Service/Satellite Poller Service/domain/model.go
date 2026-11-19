@@ -84,17 +84,17 @@ type FireCluster struct {
 // HazardEvent is the internal, transport-independent representation of the
 // canonical HazardEvent published to Kafka. The publisher maps it to Protobuf.
 type HazardEvent struct {
-	HazardID    string
-	Source      string
-	SourceRefID string
-	HazardType  string
-	Severity    string
-	AreaName    string
-	Latitude    float64
-	Longitude   float64
-	OccurredAt  time.Time
-	IngestedAt  time.Time
-	Attributes  map[string]any
+	HazardID    string         `json:"hazard_id,omitempty"`
+	Source      string         `json:"source"`
+	SourceRefID string         `json:"source_ref_id"`
+	HazardType  string         `json:"hazard_type"`
+	Severity    string         `json:"severity"`
+	AreaName    string         `json:"area_name,omitempty"`
+	Latitude    float64        `json:"latitude"`
+	Longitude   float64        `json:"longitude"`
+	OccurredAt  time.Time      `json:"occurred_at"`
+	IngestedAt  time.Time      `json:"ingested_at"`
+	Attributes  map[string]any `json:"attributes,omitempty"`
 }
 
 // Checkpoint stores a durable progress marker. Keep feed ingestion and event

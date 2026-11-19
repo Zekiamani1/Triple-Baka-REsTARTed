@@ -40,18 +40,11 @@ type Repository interface {
 	) error
 }
 
-type ProvinceReference struct {
-	Name      string  `json:"name"`
-	Latitude  float64 `json:"latitude"`
-	Longitude float64 `json:"longitude"`
-}
-
 type Options struct {
-	BatchSize         int
-	PollInterval      time.Duration
-	MaxLateness       time.Duration
-	ProvinceReference []ProvinceReference
-	Logger            *slog.Logger
+	BatchSize    int
+	PollInterval time.Duration
+	MaxLateness  time.Duration
+	Logger       *slog.Logger
 }
 
 type Stats struct {
@@ -83,9 +76,6 @@ func NewProcessor(repo Repository, opts Options) (*Processor, error) {
 	if repo == nil {
 		return nil, errors.New("processing repository is required")
 	}
-	if len(opts.ProvinceReference) == 0 {
-		return nil, errors.New("province reference data is required")
-	}
 	if opts.MaxLateness <= 0 {
 		return nil, errors.New("max lateness must be positive")
 	}
@@ -97,11 +87,6 @@ func NewProcessor(repo Repository, opts Options) (*Processor, error) {
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
-	}
-	for _, p := range opts.ProvinceReference {
-		if strings.TrimSpace(p.Name) == "" || p.Latitude < -90 || p.Latitude > 90 || p.Longitude < -180 || p.Longitude > 180 {
-			return nil, fmt.Errorf("invalid province reference: %+v", p)
-		}
 	}
 	return &Processor{repo: repo, opts: opts, logger: opts.Logger.With("component", "satellite-processor")}, nil
 }
@@ -206,7 +191,7 @@ func (p *Processor) ProcessAvailable(ctx context.Context) (int, error) {
 	if changed {
 		computed, singles := BuildClusters(allDetections, time.Now().UTC())
 		singleCount = singles
-		clusters, outbox, err = ReconcileClusters(oldClusters, computed, p.opts.ProvinceReference, time.Now().UTC())
+		clusters, outbox, err = ReconcileClusters(oldClusters, computed, time.Now().UTC())
 		if err != nil {
 			return 0, fmt.Errorf("reconcile fire clusters: %w", err)
 		}
