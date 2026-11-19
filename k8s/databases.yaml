@@ -24,8 +24,10 @@ spec:
     users: mongo-cluster-secrets
   pmm:
     enabled: false
+    image: percona/pmm-client:2.44.0
   backup:
     enabled: false
+    image: percona/percona-backup-mongodb:2.8.0
   sharding:
     enabled: true
     configsvrReplSet:
