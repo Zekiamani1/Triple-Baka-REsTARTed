@@ -116,9 +116,27 @@ func run() error {
 		return fmt.Errorf("create satellite feed client: %w", err)
 	}
 
+	sessionCtx, cancelSession := context.WithTimeout(rootCtx, startupTimeout)
+	session, err := feedClient.GetSession(sessionCtx)
+	cancelSession()
+	if err != nil {
+		return fmt.Errorf("get satellite session: %w", err)
+	}
+
+	latestOffset, err := session.LatestOffset()
+	if err != nil {
+		return fmt.Errorf("read session latest_offset: %w", err)
+	}
+
+	logger.Info("satellite session verified",
+		"latest_offset", latestOffset,
+	)
+
 	ingestionService, err := client.NewService(feedClient, repo, client.Options{
-		ReconnectDelay: cfg.ReconnectDelay,
-		Logger:         logger,
+		ReconnectDelay:  cfg.ReconnectDelay,
+		LatestOffset:    latestOffset,
+		HasLatestOffset: true,
+		Logger:          logger,
 	})
 	if err != nil {
 		return fmt.Errorf("create ingestion service: %w", err)
@@ -249,17 +267,19 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	reconnectDelay, err := durationOrDefault(
+	reconnectDelay, err := durationWithUnit(
 		"SATELLITE_RECONNECT_DELAY_SECONDS",
 		DefaultReconnectDelay,
+		time.Second,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	maxLateness, err := durationOrDefault(
+	maxLateness, err := durationWithUnit(
 		"MAX_LATENESS_MINUTES",
 		DefaultMaxLateness,
+		time.Minute,
 	)
 	if err != nil {
 		return nil, err
@@ -343,20 +363,26 @@ func requiredEnv(key string) (string, error) {
 	return value, nil
 }
 
-// durationOrDefault parses a duration from environment variables
-// or returns the fallback value.
-func durationOrDefault(key string, fallback time.Duration) (time.Duration, error) {
+func durationWithUnit(
+	key string,
+	fallback time.Duration,
+	unit time.Duration,
+) (time.Duration, error) {
 	value := strings.TrimSpace(os.Getenv(key))
+
 	if value == "" {
 		return fallback, nil
 	}
 
 	parsed, err := strconv.Atoi(value)
-	if err != nil || parsed < 0 {
-		return 0, fmt.Errorf("%s must be a non-negative integer", key)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf(
+			"%s must be a positive integer",
+			key,
+		)
 	}
 
-	return time.Duration(parsed) * time.Second, nil
+	return time.Duration(parsed) * unit, nil
 }
 
 // csvEnvOrDefault parses comma-separated environment values

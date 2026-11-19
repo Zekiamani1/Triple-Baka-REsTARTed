@@ -45,9 +45,10 @@ type Options struct {
 	InitialOffset string
 
 	// base delay kalau stream disconnect
-	ReconnectDelay time.Duration
-
-	Logger *slog.Logger
+	ReconnectDelay  time.Duration
+	LatestOffset    int64
+	HasLatestOffset bool
+	Logger          *slog.Logger
 }
 
 type Service struct {
@@ -77,6 +78,9 @@ func NewService(client *Client, repo Repository, opts Options) (*Service, error)
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
+	if opts.HasLatestOffset && opts.LatestOffset < 0 {
+		return nil, errors.New("session latest offset cannot be negative")
+	}
 
 	return &Service{
 		client: *client,
@@ -98,6 +102,31 @@ func (s *Service) Run(ctx context.Context) error {
 	if found {
 		lastOffset = checkpoint.Offset
 		from = strconv.FormatInt(lastOffset, 10)
+	}
+
+	if s.opts.HasLatestOffset {
+		if found && checkpoint.Offset > s.opts.LatestOffset {
+			return fmt.Errorf(
+				"stored feed checkpoint %d is ahead of session latest_offset %d",
+				checkpoint.Offset,
+				s.opts.LatestOffset,
+			)
+		}
+
+		if !found {
+			initial, err := parseOffset(s.opts.InitialOffset)
+			if err != nil {
+				return fmt.Errorf("parse initial offset: %w", err)
+			}
+
+			if initial > s.opts.LatestOffset {
+				return fmt.Errorf(
+					"initial offset %d is ahead of session latest_offset %d",
+					initial,
+					s.opts.LatestOffset,
+				)
+			}
+		}
 	}
 
 	attempt := 0
