@@ -5,6 +5,105 @@ services:
       - "27017:27017"
     volumes:
       - mongo-data:/data/db
+
+  mongo-config:
+    image: mongo:8
+    command: ["mongod", "--configsvr", "--replSet", "configRS", "--port", "27019", "--bind_ip_all"]
+    volumes:
+      - mongo-config-data:/data/configdb
+
+  mongo-shard-1:
+    image: mongo:8
+    command: ["mongod", "--shardsvr", "--replSet", "shard1RS", "--port", "27018", "--bind_ip_all"]
+    volumes:
+      - mongo-shard-1-data:/data/db
+
+  mongo-shard-2:
+    image: mongo:8
+    command: ["mongod", "--shardsvr", "--replSet", "shard2RS", "--port", "27018", "--bind_ip_all"]
+    volumes:
+      - mongo-shard-2-data:/data/db
+
+  mongo-replica-init:
+    image: mongo:8
+    restart: "no"
+    entrypoint: ["mongosh", "--nodb", "--quiet", "/scripts/init-replicas.js"]
+    volumes:
+      - ./infra/mongo:/scripts:ro
+    depends_on:
+      - mongo-config
+      - mongo-config-2
+      - mongo-config-3
+      - mongo-shard-1
+      - mongo-shard-1-replica-2
+      - mongo-shard-1-replica-3
+      - mongo-shard-2
+      - mongo-shard-2-replica-2
+      - mongo-shard-2-replica-3
+
+  mongo-router:
+    image: mongo:8
+    command: ["mongos", "--configdb", "configRS/mongo-config:27019,mongo-config-2:27019,mongo-config-3:27019", "--port", "27017", "--bind_ip_all"]
+    ports:
+      - "127.0.0.1:27020:27017"
+    depends_on:
+      mongo-replica-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "quit(db.adminCommand({ping:1}).ok ? 0 : 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  mongo-cluster-init:
+    image: mongo:8
+    restart: "no"
+    entrypoint: ["mongosh", "--host", "mongo-router", "--quiet", "/scripts/init-cluster.js"]
+    environment:
+      MONGO_DB_NAME: ${MONGO_DB_NAME:-bnpb}
+      MONGO_COLLECTION: ${MONGO_COLLECTION:-hazard_events}
+    volumes:
+      - ./infra/mongo:/scripts:ro
+    depends_on:
+      mongo-router:
+        condition: service_healthy
+
+  mongo-shard-1-replica-2:
+    image: mongo:8
+    command: ["mongod", "--shardsvr", "--replSet", "shard1RS", "--port", "27018", "--bind_ip_all"]
+    volumes:
+      - mongo-shard-1-replica-2-data:/data/db
+
+  mongo-shard-1-replica-3:
+    image: mongo:8
+    command: ["mongod", "--shardsvr", "--replSet", "shard1RS", "--port", "27018", "--bind_ip_all"]
+    volumes:
+      - mongo-shard-1-replica-3-data:/data/db
+
+  mongo-shard-2-replica-2:
+    image: mongo:8
+    command: ["mongod", "--shardsvr", "--replSet", "shard2RS", "--port", "27018", "--bind_ip_all"]
+    volumes:
+      - mongo-shard-2-replica-2-data:/data/db
+
+  mongo-shard-2-replica-3:
+    image: mongo:8
+    command: ["mongod", "--shardsvr", "--replSet", "shard2RS", "--port", "27018", "--bind_ip_all"]
+    volumes:
+      - mongo-shard-2-replica-3-data:/data/db
+
+  mongo-config-2:
+    image: mongo:8
+    command: ["mongod", "--configsvr", "--replSet", "configRS", "--port", "27019", "--bind_ip_all"]
+    volumes:
+      - mongo-config-2-data:/data/configdb
+
+  mongo-config-3:
+    image: mongo:8
+    command: ["mongod", "--configsvr", "--replSet", "configRS", "--port", "27019", "--bind_ip_all"]
+    volumes:
+      - mongo-config-3-data:/data/configdb
+
   kafka-aggregate:
     image: apache/kafka:latest
     ports:
@@ -61,23 +160,33 @@ services:
       - --topic
       - hazard-ingest
       - --partitions
-      - "1"
+      - "12"
       - --replication-factor
       - "1"
   aggregate:
     build: "./Aggregate Service"
-    ports:
-      - "50051:50051"
+    expose:
+      - "50051"
+    deploy:
+      replicas: 3
+    init: true
+    stop_grace_period: 40s
     env_file: "./Aggregate Service/.env"
+    environment:
+      MONGO_URI: mongodb://mongo-router:27017
+      AGGREGATOR_PORT: "50051"
+      KAFKA_CONSUMER_GROUP: aggregate-ingestion
+      MONGO_DB_NAME: ${MONGO_DB_NAME:-bnpb}
+      MONGO_COLLECTION: ${MONGO_COLLECTION:-hazard_events}
     depends_on:
-      mongo-aggregate:
-        condition: service_started
+      mongo-cluster-init:
+        condition: service_completed_successfully
       kafka-init:
         condition: service_completed_successfully
       kafka-init-ingest:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "grpcurl -plaintext -proto /app/health.proto -d '{\"service\":\"\"}' localhost:$${AGGREGATOR_PORT} grpc.health.v1.Health/Check | grep -q SERVING"]
+      test: ["CMD-SHELL", "grpcurl -plaintext -import-path /app -proto health.proto -d '{\"service\":\"\"}' localhost:$${AGGREGATOR_PORT} grpc.health.v1.Health/Check | grep -q '\"SERVING\"'"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -222,21 +331,19 @@ services:
     depends_on:
       auth-service:
         condition: service_healthy
-  otel-lgtm:
-    image: grafana/otel-lgtm:latest
-    container_name: otel-lgtm
-    ports:
-      - "3000:3000"   # Grafana UI (admin / admin)
-      - "4317:4317"   # OTLP gRPC receiver
-      - "4318:4318"   # OTLP HTTP receiver
-    volumes:
-      - lgtm-data:/data
-    restart: unless-stopped
 volumes:
+  mongo-config-data:
+  mongo-shard-1-data:
+  mongo-shard-2-data:
   mongo-data:
   kafka-data:
   bmkg-data:
   pvmbg-data:
   auth-db-data:
   auth-keys:
-  lgtm-data:
+  mongo-shard-1-replica-2-data:
+  mongo-shard-1-replica-3-data:
+  mongo-shard-2-replica-2-data:
+  mongo-shard-2-replica-3-data:
+  mongo-config-2-data:
+  mongo-config-3-data:

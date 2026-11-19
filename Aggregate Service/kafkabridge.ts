@@ -28,6 +28,21 @@ const producer: Producer = kafka.producer({
   createPartitioner: Partitioners.DefaultPartitioner,
 });
 const consumer: Consumer = kafka.consumer({ groupId: kafkaConfig.groupId });
+let consumerReady = false;
+
+consumer.on(consumer.events.GROUP_JOIN, () => { consumerReady = true; });
+consumer.on(consumer.events.CRASH, () => { consumerReady = false; });
+consumer.on(consumer.events.STOP, () => { consumerReady = false; });
+consumer.on(consumer.events.DISCONNECT, () => { consumerReady = false; });
+
+export function isKafkaReady(): boolean {
+  return consumerReady;
+}
+
+export async function stopIngestConsumer(): Promise<void> {
+  consumerReady = false;
+  await consumer.stop();
+}
 
 export async function connectKafka(): Promise<void> {
   await producer.connect();

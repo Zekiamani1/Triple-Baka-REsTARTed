@@ -15,13 +15,17 @@ const shutdownTelemetry = initTelemetry();
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import path from "path";
+import { hostname } from "node:os";
+import { createHash } from "node:crypto";
 import { MongoClient } from "mongodb";
 import { kafka, mongo, service } from "./config";
 import {
   connectKafka,
   disconnectKafka,
+  isKafkaReady,
   publishHazard,
   runIngestConsumer,
+  stopIngestConsumer,
 } from "./kafkabridge";
 
 const packageDefinition = protoLoader.loadSync(path.resolve("proto/hazard/hazard.proto"), {
@@ -47,9 +51,32 @@ const healthPackageDefinition = protoLoader.loadSync(
 const proto = grpc.loadPackageDefinition(packageDefinition) as any;
 const healthProto = grpc.loadPackageDefinition(healthPackageDefinition) as any;
 
-const mongoClient = new MongoClient(mongo.uri);
+const mongoClient = new MongoClient(mongo.uri, {
+    retryWrites: true,
+    writeConcern: { w: "majority", journal: true, wtimeoutMS: 10000 },
+    readConcern: { level: "majority" },
+    serverSelectionTimeoutMS: 15000,
+});
 
 let collection: any;
+const server = new grpc.Server();
+let ready = false;
+let stopping = false;
+const healthWatchers = new Set<grpc.ServerWritableStream<any, any>>();
+
+function healthStatus(): string {
+    return ready && !stopping && isKafkaReady() ? "SERVING" : "NOT_SERVING";
+}
+
+async function currentHealthStatus(): Promise<string> {
+    if (healthStatus() !== "SERVING") return "NOT_SERVING";
+    try {
+        await mongoClient.db(mongo.dbName).command({ ping: 1 }, { timeoutMS: 1000 });
+        return healthStatus();
+    } catch {
+        return "NOT_SERVING";
+    }
+}
 
 const hazardPackage = proto.hazard;
 const healthPackage = healthProto.grpc.health.v1;
@@ -71,7 +98,7 @@ function protoToHazard(protoHazard: any) {
 }
 
 function withoutDeliveryState(document: any): Record<string, unknown> {
-    const { _id, published, published_at, ...hazardEvent } = document;
+    const { _id, partition_key, published, published_at, ...hazardEvent } = document;
     return hazardEvent;
 }
 
@@ -113,7 +140,15 @@ async function ingestHazard(hazardEvent: any): Promise<void> {
                     ingested_at: toDate(hazardEvent.ingested_at),
                     attributes: toStruct(hazardEvent.attributes),
                 };
+                if (typeof hazardEvent.source !== "string" || !hazardEvent.source.trim() ||
+                    typeof hazardEvent.source_ref_id !== "string" || !hazardEvent.source_ref_id.trim()) {
+                    throw new Error("source and source_ref_id must be non-empty strings");
+                }
                 const identity = {
+                    // Matches the pre-split hash ranges configured by init-cluster.js.
+                    partition_key: createHash("sha256")
+                        .update(JSON.stringify([hazardEvent.source, hazardEvent.source_ref_id]))
+                        .digest("hex"),
                     source: hazardEvent.source,
                     source_ref_id: hazardEvent.source_ref_id,
                 };
@@ -122,7 +157,7 @@ async function ingestHazard(hazardEvent: any): Promise<void> {
 
                 try {
                     await trackMongoOp("insertOne", () =>
-                        collection.insertOne({ ...hazardEvent, published: false }),
+                        collection.insertOne({ ...hazardEvent, ...identity, published: false }),
                     );
                 } catch (error: any) {
                     if (error?.code !== 11000) {
@@ -275,9 +310,9 @@ async function listHazards(call: grpc.ServerUnaryCall<any, any>, callback: grpc.
                 const [hazards, total] = await Promise.all([
                     trackMongoOp("find", () =>
                         collection.find(filter, {
-                            projection: { _id: 0, published: 0, published_at: 0 }
+                            projection: { _id: 0, partition_key: 0, published: 0, published_at: 0 }
                         })
-                        .sort({ ingested_at: -1 })
+                        .sort({ ingested_at: -1, source: 1, source_ref_id: 1 })
                         .skip(offset)
                         .limit(limit)
                         .toArray()
@@ -352,7 +387,7 @@ async function getHazard(call: grpc.ServerUnaryCall<any, any>, callback: grpc.se
                 const hazardEvent = await trackMongoOp("findOne", () =>
                     collection.findOne(
                         { hazard_id: hazardId },
-                        { projection: { _id: 0, published: 0, published_at: 0 } },
+                        { projection: { _id: 0, partition_key: 0, published: 0, published_at: 0 } },
                     ),
                 );
 
@@ -402,7 +437,7 @@ async function main () {
 
     const db = mongoClient.db(mongo.dbName);
     collection = db.collection(mongo.collection);
-    await collection.createIndex({ source: 1, source_ref_id: 1 }, { unique: true });
+    await collection.createIndex({ partition_key: 1, source: 1, source_ref_id: 1 }, { unique: true });
     await collection.createIndex({ hazard_id: 1 });
 
     await connectKafka();
@@ -413,19 +448,42 @@ async function main () {
         process.exit(1);
     });
 
-    const server = new grpc.Server();
-
     server.addService(hazardPackage.Aggregate.service, {
         aggregateEvent,
         getHazard,
         listHazards,
     } );
     server.addService(healthPackage.Health.service, {
-        Check: (_call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) => {
-            callback(null, { status: "SERVING" });
+        Check: async (call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) => {
+            if (call.request.service && call.request.service !== "hazard.Aggregate") {
+                callback({ code: grpc.status.NOT_FOUND, message: "Unknown service" });
+                return;
+            }
+            callback(null, { status: await currentHealthStatus() });
         },
         Watch: (call: grpc.ServerWritableStream<any, any>) => {
-            call.write({ status: "SERVING" });
+            if (call.request.service && call.request.service !== "hazard.Aggregate") {
+                call.write({ status: "SERVICE_UNKNOWN" });
+                call.end();
+                return;
+            }
+            healthWatchers.add(call);
+            let previous = "";
+            const publish = async () => {
+                const status = await currentHealthStatus();
+                if (healthWatchers.has(call) && status !== previous) {
+                    previous = status;
+                    call.write({ status });
+                }
+            };
+            void publish();
+            const timer = setInterval(() => { void publish(); }, 2000);
+            const cleanup = () => {
+                clearInterval(timer);
+                healthWatchers.delete(call);
+            };
+            call.on("cancelled", cleanup);
+            call.on("close", cleanup);
         },
     });
 
@@ -435,10 +493,13 @@ async function main () {
         (error, port) => {
             if (error) {
                 logError("failed to bind gRPC server", { err: error.message });
+                void shutdown(1);
                 return;
             }
 
+            ready = true;
             logInfo("Aggregate Service started", {
+                instance_id: hostname(),
                 grpc_port: port,
                 kafka_in_topic: kafka.inTopic,
                 kafka_out_topic: kafka.outTopic,
@@ -447,15 +508,46 @@ async function main () {
     );
 }
 
-async function shutdown() {
-  await disconnectKafka();
-  await mongoClient.close();
-  await shutdownTelemetry();
-  process.exit(0);
+async function shutdown(exitCode = 0) {
+  if (stopping) return;
+  stopping = true;
+  ready = false;
+  logInfo("Aggregate Service draining", { instance_id: hostname() });
+  for (const call of healthWatchers) {
+    call.write({ status: "NOT_SERVING" });
+    call.end();
+  }
+  healthWatchers.clear();
+  const deadline = setTimeout(() => {
+    logError("Aggregate shutdown deadline exceeded", { instance_id: hostname() });
+    server.forceShutdown();
+    process.exit(1);
+  }, 35000);
+  deadline.unref();
+  try {
+    // Allow Envoy's active health check to remove this instance first.
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    await Promise.all([
+      stopIngestConsumer(),
+      new Promise<void>((resolve, reject) => {
+        server.tryShutdown(error => error ? reject(error) : resolve());
+      }),
+    ]);
+    // Producer and storage stay available until in-flight work has finished.
+    await disconnectKafka();
+    await mongoClient.close();
+    await shutdownTelemetry();
+    clearTimeout(deadline);
+    process.exit(exitCode);
+  } catch (error) {
+    logError("Aggregate shutdown failed", { err: String(error) });
+    server.forceShutdown();
+    process.exit(1);
+  }
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => { void shutdown(); });
+process.on("SIGTERM", () => { void shutdown(); });
 main().catch(async (error) => {
   logError("Aggregate Service failed to start", {
     err: error instanceof Error ? error.message : String(error),

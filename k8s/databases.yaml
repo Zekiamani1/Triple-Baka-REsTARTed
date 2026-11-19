@@ -1,61 +1,198 @@
-apiVersion: apps/v1
-kind: StatefulSet
+apiVersion: psmdb.percona.com/v1
+kind: PerconaServerMongoDB
 metadata:
-  name: mongo-aggregate
-  labels:
-    app: mongo-aggregate
+  name: mongo-cluster
+  finalizers:
+    - percona.com/delete-psmdb-pods-in-order
 spec:
-  serviceName: mongo-aggregate
-  replicas: 1
-  selector:
-    matchLabels:
-      app: mongo-aggregate
+  crVersion: 1.19.0
+  image: percona/percona-server-mongodb:8.0.4-1-multi
+  imagePullPolicy: IfNotPresent
+  unsafeFlags:
+    tls: true
+    replsetSize: true
+    mongosSize: true
+    terminationGracePeriod: true
+    backupIfUnhealthy: true
+  tls:
+    mode: disabled
+  updateStrategy: SmartUpdate
+  upgradeOptions:
+    apply: disabled
+    setFCV: false
+  secrets:
+    users: mongo-cluster-secrets
+  pmm:
+    enabled: false
+    image: percona/pmm-client:2.44.0
+  backup:
+    enabled: false
+    image: percona/percona-backup-mongodb:2.8.0
+  sharding:
+    enabled: true
+    configsvrReplSet:
+      size: 3
+      configuration: |
+        storage:
+          wiredTiger:
+            engineConfig:
+              cacheSizeGB: 0.25
+      livenessProbe:
+        timeoutSeconds: 15
+        failureThreshold: 10
+      readinessProbe:
+        periodSeconds: 10
+        timeoutSeconds: 15
+        failureThreshold: 10
+      affinity:
+        antiAffinityTopologyKey: "none"
+      expose:
+        enabled: false
+        type: ClusterIP
+      volumeSpec:
+        persistentVolumeClaim:
+          resources:
+            requests:
+              storage: 1Gi
+    mongos:
+      size: 2
+      livenessProbe:
+        timeoutSeconds: 15
+        failureThreshold: 10
+      readinessProbe:
+        periodSeconds: 10
+        timeoutSeconds: 15
+        failureThreshold: 10
+      affinity:
+        antiAffinityTopologyKey: "none"
+      expose:
+        type: ClusterIP
+  replsets:
+    - name: shard1
+      size: 3
+      configuration: |
+        storage:
+          wiredTiger:
+            engineConfig:
+              cacheSizeGB: 0.25
+      livenessProbe:
+        timeoutSeconds: 15
+        failureThreshold: 10
+      readinessProbe:
+        periodSeconds: 10
+        timeoutSeconds: 15
+        failureThreshold: 10
+      affinity:
+        antiAffinityTopologyKey: "none"
+      expose:
+        enabled: false
+        type: ClusterIP
+      volumeSpec:
+        persistentVolumeClaim:
+          resources:
+            requests:
+              storage: 1Gi
+    - name: shard2
+      size: 3
+      configuration: |
+        storage:
+          wiredTiger:
+            engineConfig:
+              cacheSizeGB: 0.25
+      livenessProbe:
+        timeoutSeconds: 15
+        failureThreshold: 10
+      readinessProbe:
+        periodSeconds: 10
+        timeoutSeconds: 15
+        failureThreshold: 10
+      affinity:
+        antiAffinityTopologyKey: "none"
+      expose:
+        enabled: false
+        type: ClusterIP
+      volumeSpec:
+        persistentVolumeClaim:
+          resources:
+            requests:
+              storage: 1Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongo-cluster-init
+  labels:
+    app: mongo-cluster-init
+spec:
+  ttlSecondsAfterFinished: 60
   template:
     metadata:
       labels:
-        app: mongo-aggregate
+        app: mongo-cluster-init
     spec:
+      restartPolicy: OnFailure
       containers:
-        - name: mongo-aggregate
-          image: mongo:8
+        - name: mongo-cluster-init
+          image: percona/percona-server-mongodb:8.0.4-1-multi
           imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 27017
-              name: mongodb
-          volumeMounts:
-            - name: mongo-data
-              mountPath: /data/db
-          readinessProbe:
-            exec:
-              command:
-                - mongosh
-                - --quiet
-                - --eval
-                - db.adminCommand('ping')
-            initialDelaySeconds: 10
-            periodSeconds: 15
-            timeoutSeconds: 15
-            failureThreshold: 12
-          livenessProbe:
-            exec:
-              command:
-                - mongosh
-                - --quiet
-                - --eval
-                - db.adminCommand('ping')
-            initialDelaySeconds: 45
-            periodSeconds: 20
-            timeoutSeconds: 15
-            failureThreshold: 6
-  volumeClaimTemplates:
-    - metadata:
-        name: mongo-data
-      spec:
-        accessModes:
-          - ReadWriteOnce
-        resources:
-          requests:
-            storage: 1Gi
+          envFrom:
+            - configMapRef:
+                name: aggregate-env
+            - secretRef:
+                name: mongo-cluster-secrets
+          env:
+            - name: MONGO_URI
+              value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until mongosh "$MONGO_URI" --quiet --eval 'quit(db.getSiblingDB("config").shards.countDocuments() >= 2 ? 0 : 1)' >/dev/null 2>&1; do
+                echo "Waiting for Percona Operator to register MongoDB shards..."
+                sleep 5
+              done
+              mongosh "$MONGO_URI" --quiet --eval '
+              const command = (res) => { if (res.ok !== 1) throw new Error(JSON.stringify(res)); return res; };
+              const databaseName = process.env.MONGO_DB_NAME || "bnpb";
+              const collectionName = process.env.MONGO_COLLECTION || "hazard_events";
+              const namespace = `${databaseName}.${collectionName}`;
+              const clusterUri = `mongodb://${encodeURIComponent(process.env.MONGODB_CLUSTER_ADMIN_USER)}:${encodeURIComponent(process.env.MONGODB_CLUSTER_ADMIN_PASSWORD)}@mongo-router:27017/?authSource=admin`;
+              const clusterConn = new Mongo(clusterUri);
+              const admin = clusterConn.getDB("admin");
+              const configDb = clusterConn.getDB("config");
+              command(admin.runCommand({ setDefaultRWConcern: 1, defaultWriteConcern: { w: "majority", wtimeout: 10000 } }));
+              const events = db.getSiblingDB(databaseName).getCollection(collectionName);
+              const key = { partition_key: 1, source: 1, source_ref_id: 1 };
+              if (!configDb.collections.findOne({ _id: namespace, dropped: { $ne: true } })) {
+                if (events.countDocuments({ partition_key: { $exists: false } }) !== 0)
+                  throw new Error("Collection contains documents without partition_key; migrate them before enabling sharding");
+                events.createIndex(key, { unique: true });
+                command(admin.runCommand({ shardCollection: namespace, key, unique: true }));
+              }
+              const metadata = configDb.collections.findOne({ _id: namespace });
+              if (JSON.stringify(metadata.key) !== JSON.stringify(key))
+                throw new Error("Unexpected existing shard key");
+              const setup = db.getSiblingDB(databaseName).getCollection("_cluster_setup");
+              if (!setup.findOne({ _id: namespace, rangesReady: true })) {
+                const [firstShard, secondShard] = configDb.shards.find().sort({ _id: 1 }).toArray().map(s => s._id);
+                if (!firstShard || !secondShard)
+                  throw new Error("Expected at least 2 shards to distribute initial hash ranges");
+                const boundary = { partition_key: "8", source: MinKey(), source_ref_id: MinKey() };
+                const chunks = configDb.chunks;
+                if (!chunks.findOne({ uuid: metadata.uuid, "min.partition_key": "8" }))
+                  command(admin.runCommand({ split: namespace, middle: boundary }));
+                const lower = chunks.find({ uuid: metadata.uuid }).sort({ min: 1 }).limit(1).next();
+                if (lower.shard !== firstShard)
+                  command(admin.runCommand({ moveChunk: namespace, find: { partition_key: "0", source: "", source_ref_id: "" }, to: firstShard }));
+                const upper = chunks.findOne({ uuid: metadata.uuid, "min.partition_key": "8" });
+                if (upper.shard !== secondShard)
+                  command(admin.runCommand({ moveChunk: namespace, find: { partition_key: "9", source: "", source_ref_id: "" }, to: secondShard }));
+                setup.updateOne({ _id: namespace }, { $set: { rangesReady: true } }, { upsert: true });
+              }
+              events.createIndex({ hazard_id: 1 });
+              events.createIndex({ ingested_at: -1, source: 1, source_ref_id: 1 });
+              print(`${namespace}: sharded with unique event identity; initial hash ranges distributed`);
+              '
 ---
 apiVersion: apps/v1
 kind: StatefulSet

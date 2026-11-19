@@ -70,7 +70,12 @@ static_resources:
                         - match: { prefix: "/.well-known/jwks.json"}
                           route: { cluster: auth_service }
                         - match: { prefix: "/aggregate/"}
-                          route: { cluster: aggregator_service }
+                          route:
+                            cluster: aggregator_service
+                            retry_policy:
+                              retry_on: connect-failure,refused-stream,unavailable,reset,5xx
+                              num_retries: 3
+                              per_try_timeout: 5s
                           typed_per_filter_config:
                             envoy.filters.http.jwt_authn:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
@@ -169,6 +174,19 @@ static_resources:
     - name: aggregator_service
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+      connect_timeout: 2s
+      dns_lookup_family: V4_ONLY
+      dns_refresh_rate: 2s
+      common_lb_config:
+        healthy_panic_threshold:
+          value: 0
+      health_checks:
+        - timeout: 2s
+          interval: 2s
+          unhealthy_threshold: 1
+          healthy_threshold: 1
+          grpc_health_check:
+            service_name: hazard.Aggregate
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions

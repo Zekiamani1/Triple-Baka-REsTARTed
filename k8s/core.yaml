@@ -60,6 +60,7 @@ metadata:
   labels:
     app: kafka-init
 spec:
+  ttlSecondsAfterFinished: 60
   template:
     metadata:
       labels:
@@ -80,7 +81,8 @@ spec:
                 sleep 3
               done
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-events --partitions 1 --replication-factor 1
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-ingest --partitions 1 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-ingest --partitions 12 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --alter --topic hazard-ingest --partitions 12 >/dev/null 2>&1 || true
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -89,7 +91,7 @@ metadata:
   labels:
     app: aggregate
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: aggregate
@@ -98,6 +100,27 @@ spec:
       labels:
         app: aggregate
     spec:
+      terminationGracePeriodSeconds: 40
+      initContainers:
+        - name: wait-for-mongo
+          image: percona/percona-server-mongodb:8.0.4-1-multi
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: aggregate-env
+            - secretRef:
+                name: mongo-cluster-secrets
+          env:
+            - name: MONGO_URI
+              value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until mongosh "$MONGO_URI" --quiet --eval 'const dbName = process.env.MONGO_DB_NAME || "bnpb"; const colName = process.env.MONGO_COLLECTION || "hazard_events"; quit(db.getSiblingDB(dbName).getCollection("_cluster_setup").findOne({ _id: `${dbName}.${colName}`, rangesReady: true }) ? 0 : 1)' >/dev/null 2>&1; do
+                echo "Waiting for mongo-cluster-init to finish sharding setup..."
+                sleep 3
+              done
       containers:
         - name: aggregate
           image: aat-aggregate:latest
@@ -108,6 +131,11 @@ spec:
           envFrom:
             - configMapRef:
                 name: aggregate-env
+            - secretRef:
+                name: mongo-cluster-secrets
+          env:
+            - name: MONGO_URI
+              value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin
           readinessProbe:
             grpc:
               port: 50051

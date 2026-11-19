@@ -13,4 +13,4 @@ COPY . .
 COPY --from=grpcurl-builder /go/bin/grpcurl /usr/local/bin/grpcurl
 COPY proto/grpc/health/v1/health.proto /app/health.proto
 
-CMD ["npm", "run", "dev"]
+CMD ["node", "--import", "tsx", "index.ts"]
