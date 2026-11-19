@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"satellitepoller/domain"
@@ -238,7 +239,7 @@ func (r *Repository) LoadDetections(ctx context.Context) ([]domain.Detection, er
 // detection memberships.
 func (r *Repository) LoadClusters(ctx context.Context) ([]domain.FireCluster, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT cluster_id, source_ref_id, status, latitude, longitude, occurred_at,
+		SELECT cluster_id, anchor_key, source_ref_id, status, latitude, longitude, occurred_at,
 		       detection_count, total_frp_mw, severity, satellites_json,
 		       max_confidence, detection_keys_json, revision, updated_at
 		FROM fire_clusters ORDER BY cluster_id
@@ -274,6 +275,10 @@ func (r *Repository) LoadClusters(ctx context.Context) ([]domain.FireCluster, er
 		}
 		if err := json.Unmarshal(keysJSON, &c.DetectionKeys); err != nil {
 			return nil, fmt.Errorf("decode cluster detection keys: %w", err)
+		}
+		if c.AnchorKey == "" && len(c.DetectionKeys) > 0 {
+			sort.Strings(c.DetectionKeys)
+			c.AnchorKey = c.DetectionKeys[0]
 		}
 		items = append(items, c)
 	}
@@ -423,11 +428,12 @@ func upsertCluster(ctx context.Context, tx *sql.Tx, c domain.FireCluster) error 
 	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO fire_clusters(
-			cluster_id, source_ref_id, status, latitude, longitude, occurred_at,
+			cluster_id, anchor_key, source_ref_id, status, latitude, longitude, occurred_at,
 			detection_count, total_frp_mw, severity, satellites_json,
 			max_confidence, detection_keys_json, revision, updated_at
 		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(cluster_id) DO UPDATE SET
+			anchor_key = excluded.anchor_key,
 			source_ref_id = excluded.source_ref_id,
 			status = excluded.status,
 			latitude = excluded.latitude,

@@ -62,102 +62,296 @@ func BuildHazardEvent(cluster domain.FireCluster, now time.Time) (domain.HazardE
 // clusters. It preserves an existing cluster ID when its deterministic anchor
 // remains part of that component, increments revision only when content changes,
 // and creates retract envelopes for clusters that disappeared or were superseded.
-func ReconcileClusters(oldClusters, computed []domain.FireCluster, now time.Time) ([]domain.FireCluster, []domain.OutboxEvent, error) {
+func ReconcileClusters(
+	oldClusters, computed []domain.FireCluster,
+	now time.Time,
+) ([]domain.FireCluster, []domain.OutboxEvent, error) {
+
 	now = now.UTC()
-	oldActive := make(map[string]domain.FireCluster)
-	allByID := make(map[string]domain.FireCluster)
+
+	// Index all old clusters and collect active ones.
+	oldByID := make(map[string]domain.FireCluster)
+	oldActive := make([]domain.FireCluster, 0)
+
 	for _, old := range oldClusters {
-		allByID[old.ID] = old
+		// Backward compatibility for clusters created before AnchorKey.
+		if old.AnchorKey == "" && len(old.DetectionKeys) > 0 {
+			keys := append([]string(nil), old.DetectionKeys...)
+			sort.Strings(keys)
+			old.AnchorKey = keys[0]
+		}
+
+		oldByID[old.ID] = old
+
 		if old.Status == domain.ClusterActive {
-			oldActive[old.ID] = old
+			oldActive = append(oldActive, old)
 		}
 	}
 
-	newByID := make(map[string]domain.FireCluster, len(computed))
-	for _, cluster := range computed {
-		newByID[cluster.ID] = cluster
+	sort.Slice(oldActive, func(i, j int) bool {
+		return oldActive[i].SourceRefID < oldActive[j].SourceRefID
+	})
+
+	// Normalize computed clusters.
+	for i := range computed {
+		sort.Strings(computed[i].DetectionKeys)
+
+		if computed[i].AnchorKey == "" &&
+			len(computed[i].DetectionKeys) > 0 {
+			computed[i].AnchorKey = computed[i].DetectionKeys[0]
+		}
+
+		if computed[i].AnchorKey == "" {
+			return nil, nil, fmt.Errorf(
+				"computed cluster has no identity anchor",
+			)
+		}
 	}
 
-	out := make([]domain.FireCluster, 0, len(allByID)+len(computed))
+	sort.Slice(computed, func(i, j int) bool {
+		return firstDetectionKey(computed[i]) <
+			firstDetectionKey(computed[j])
+	})
+
+	// Each old cluster chooses exactly one resulting component.
+	// This is what makes split handling deterministic.
+	assigned := make([][]domain.FireCluster, len(computed))
+
+	for _, old := range oldActive {
+		bestIndex := -1
+		bestContainsAnchor := false
+		bestOverlap := 0
+		bestKey := ""
+
+		for i, next := range computed {
+			overlap := intersectionCount(
+				old.DetectionKeys,
+				next.DetectionKeys,
+			)
+			if overlap == 0 {
+				continue
+			}
+
+			containsAnchor := hasString(
+				next.DetectionKeys,
+				old.AnchorKey,
+			)
+			key := firstDetectionKey(next)
+
+			better := bestIndex == -1
+
+			if !better && containsAnchor != bestContainsAnchor {
+				better = containsAnchor
+			} else if !better && overlap != bestOverlap {
+				better = overlap > bestOverlap
+			} else if !better &&
+				containsAnchor == bestContainsAnchor &&
+				overlap == bestOverlap {
+				better = key < bestKey
+			}
+
+			if better {
+				bestIndex = i
+				bestContainsAnchor = containsAnchor
+				bestOverlap = overlap
+				bestKey = key
+			}
+		}
+
+		if bestIndex >= 0 {
+			assigned[bestIndex] = append(
+				assigned[bestIndex],
+				old,
+			)
+		}
+	}
+
+	result := make([]domain.FireCluster, 0)
 	outbox := make([]domain.OutboxEvent, 0)
-	for id, cluster := range newByID {
-		previous, wasActive := oldActive[id]
-		if wasActive {
-			cluster.Revision = previous.Revision
-			if !sameClusterContent(previous, cluster) {
-				cluster.Revision++
-				payload, err := makeOutboxPayload("upsert", cluster, now, "")
+
+	// Tracks old identities that survived reconciliation.
+	usedOld := make(map[string]bool)
+
+	// Tracks cluster IDs already added to the result.
+	outputIDs := make(map[string]bool)
+
+	for i, next := range computed {
+		candidates := assigned[i]
+
+		// Merge handling: choose one identity to survive.
+		sort.Slice(candidates, func(a, b int) bool {
+			left := candidates[a]
+			right := candidates[b]
+
+			leftHasAnchor := hasString(
+				next.DetectionKeys,
+				left.AnchorKey,
+			)
+			rightHasAnchor := hasString(
+				next.DetectionKeys,
+				right.AnchorKey,
+			)
+
+			if leftHasAnchor != rightHasAnchor {
+				return leftHasAnchor
+			}
+
+			leftOverlap := intersectionCount(
+				left.DetectionKeys,
+				next.DetectionKeys,
+			)
+			rightOverlap := intersectionCount(
+				right.DetectionKeys,
+				next.DetectionKeys,
+			)
+
+			if leftOverlap != rightOverlap {
+				return leftOverlap > rightOverlap
+			}
+
+			return left.SourceRefID < right.SourceRefID
+		})
+
+		if len(candidates) > 0 {
+			// Existing identity survives.
+			survivor := candidates[0]
+
+			next.ID = survivor.ID
+			next.SourceRefID = survivor.SourceRefID
+			next.AnchorKey = survivor.AnchorKey
+			next.Revision = survivor.Revision
+
+			usedOld[survivor.ID] = true
+
+			// Only publish an update if cluster content changed.
+			if !sameClusterContent(survivor, next) {
+				next.Revision++
+
+				payload, err := makeOutboxPayload(
+					"upsert",
+					next,
+					now,
+					"",
+				)
 				if err != nil {
 					return nil, nil, err
 				}
-				outbox = append(outbox, newOutboxEvent(cluster, payload, now))
+
+				outbox = append(
+					outbox,
+					newOutboxEvent(next, payload, now),
+				)
 			}
+
 		} else {
-			// If an identical deterministic ID existed historically but was
-			// retracted/superseded, continue its revision sequence rather than
-			// reusing the old outbox idempotency key.
-			if previous, existed := allByID[id]; existed {
-				cluster.Revision = previous.Revision + 1
+			// No old cluster owns this component: new fire identity.
+			next.ID = stableFireID(next.AnchorKey)
+			next.SourceRefID = next.ID
+
+			// Continue the revision sequence if this identity existed
+			// historically and is becoming active again.
+			if previous, exists := oldByID[next.ID]; exists {
+				next.Revision = previous.Revision + 1
 			} else {
-				cluster.Revision = 1
+				next.Revision = 1
 			}
-			payload, err := makeOutboxPayload("upsert", cluster, now, "")
+
+			payload, err := makeOutboxPayload(
+				"upsert",
+				next,
+				now,
+				"",
+			)
 			if err != nil {
 				return nil, nil, err
 			}
-			outbox = append(outbox, newOutboxEvent(cluster, payload, now))
+
+			outbox = append(
+				outbox,
+				newOutboxEvent(next, payload, now),
+			)
 		}
-		cluster.UpdatedAt = now
-		out = append(out, cluster)
+
+		next.Status = domain.ClusterActive
+		next.UpdatedAt = now
+
+		result = append(result, next)
+		outputIDs[next.ID] = true
 	}
 
-	for id, previous := range oldActive {
-		if _, stillActive := newByID[id]; stillActive {
+	// Retract old identities that did not survive.
+	for _, previous := range oldActive {
+		if usedOld[previous.ID] {
 			continue
 		}
+
 		status := domain.ClusterRetracted
 		reason := "cluster_no_longer_has_two_active_detections"
+
 		for _, next := range computed {
-			if intersects(previous.DetectionKeys, next.DetectionKeys) {
+			if intersects(
+				previous.DetectionKeys,
+				next.DetectionKeys,
+			) {
 				status = domain.ClusterSuperseded
 				reason = "cluster_membership_changed_or_merged"
 				break
 			}
 		}
+
 		previous.Status = status
 		previous.Revision++
 		previous.UpdatedAt = now
-		allByID[id] = previous
-		out = append(out, previous)
+
+		result = append(result, previous)
+		outputIDs[previous.ID] = true
+
 		payload, err := json.Marshal(OutboxEnvelope{
-			Operation: "retract", SourceRefID: previous.SourceRefID,
-			Revision: previous.Revision, Reason: reason,
+			Operation:   "retract",
+			SourceRefID: previous.SourceRefID,
+			Revision:    previous.Revision,
+			Reason:      reason,
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("encode retract outbox payload: %w", err)
+			return nil, nil, fmt.Errorf(
+				"encode retract outbox payload: %w",
+				err,
+			)
 		}
-		outbox = append(outbox, newOutboxEvent(previous, payload, now))
+
+		outbox = append(
+			outbox,
+			newOutboxEvent(previous, payload, now),
+		)
 	}
 
-	// Preserve historical/inactive rows for audit and deterministic recovery.
-	for id, old := range allByID {
-		if old.Status != domain.ClusterActive {
-			if _, replaced := oldActive[id]; replaced {
-				continue
-			}
-			if _, alreadyAdded := newByID[id]; !alreadyAdded {
-				out = append(out, old)
-			}
+	// Preserve historical inactive clusters.
+	for _, old := range oldClusters {
+		if old.Status == domain.ClusterActive {
+			continue
 		}
+
+		if outputIDs[old.ID] {
+			continue
+		}
+
+		result = append(result, old)
+		outputIDs[old.ID] = true
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].ID < result[j].ID
+	})
+
 	sort.Slice(outbox, func(i, j int) bool {
 		if outbox[i].SourceRefID == outbox[j].SourceRefID {
 			return outbox[i].Revision < outbox[j].Revision
 		}
+
 		return outbox[i].SourceRefID < outbox[j].SourceRefID
 	})
-	return out, outbox, nil
+
+	return result, outbox, nil
 }
 
 func makeOutboxPayload(operation string, cluster domain.FireCluster, now time.Time, reason string) ([]byte, error) {
@@ -194,7 +388,7 @@ func newOutboxEvent(cluster domain.FireCluster, payload []byte, now time.Time) d
 
 func sameClusterContent(a, b domain.FireCluster) bool {
 	if a.SourceRefID != b.SourceRefID || a.Latitude != b.Latitude || a.Longitude != b.Longitude ||
-		a.OccurredAt.UTC() != b.OccurredAt.UTC() || a.DetectionCount != b.DetectionCount ||
+		a.OccurredAt.UTC() != b.OccurredAt.UTC() || a.DetectionCount != b.DetectionCount || a.AnchorKey != b.AnchorKey ||
 		a.TotalFRPMW != b.TotalFRPMW || a.Severity != b.Severity || a.MaxConfidence != b.MaxConfidence {
 		return false
 	}
@@ -217,16 +411,7 @@ func equalStrings(a, b []string) bool {
 }
 
 func intersects(a, b []string) bool {
-	set := make(map[string]struct{}, len(a))
-	for _, value := range a {
-		set[value] = struct{}{}
-	}
-	for _, value := range b {
-		if _, ok := set[value]; ok {
-			return true
-		}
-	}
-	return false
+	return intersectionCount(a, b) > 0
 }
 
 func stableFireID(anchor string) string {
@@ -260,4 +445,43 @@ func confidenceRank(value string) int {
 
 func isLowConfidence(value string) bool {
 	return strings.EqualFold(strings.TrimSpace(value), "low") || strings.EqualFold(strings.TrimSpace(value), "l")
+}
+
+func intersectionCount(a, b []string) int {
+	set := make(map[string]struct{}, len(a))
+
+	for _, key := range a {
+		set[key] = struct{}{}
+	}
+
+	count := 0
+	for _, key := range b {
+		if _, exists := set[key]; exists {
+			count++
+		}
+	}
+
+	return count
+}
+
+func hasString(values []string, target string) bool {
+	if target == "" {
+		return false
+	}
+
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+
+	return false
+}
+
+func firstDetectionKey(cluster domain.FireCluster) string {
+	if len(cluster.DetectionKeys) == 0 {
+		return cluster.AnchorKey
+	}
+
+	return cluster.DetectionKeys[0]
 }

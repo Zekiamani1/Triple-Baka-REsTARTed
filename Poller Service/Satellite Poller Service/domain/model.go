@@ -67,6 +67,7 @@ const (
 type FireCluster struct {
 	ID             string
 	SourceRefID    string
+	AnchorKey      string
 	Status         ClusterStatus
 	Latitude       float64
 	Longitude      float64

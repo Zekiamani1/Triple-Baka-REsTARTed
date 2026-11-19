@@ -157,7 +157,7 @@ func summarizeCluster(members []domain.Detection, now time.Time) domain.FireClus
 	anchor := keys[0]
 	id := stableFireID(anchor)
 	return domain.FireCluster{
-		ID: id, SourceRefID: id, Status: domain.ClusterActive,
+		ID: id, SourceRefID: id, Status: domain.ClusterActive, AnchorKey: anchor,
 		Latitude: sumLat / float64(len(members)), Longitude: sumLon / float64(len(members)),
 		OccurredAt: occurredAt.UTC(), DetectionCount: len(members), TotalFRPMW: totalFRP,
 		Severity: severityFor(len(members), totalFRP), Satellites: satelliteList,

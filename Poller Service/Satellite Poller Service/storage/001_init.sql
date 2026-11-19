@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS fire_clusters (
     cluster_id       TEXT PRIMARY KEY,
     source_ref_id    TEXT NOT NULL,
     status           TEXT NOT NULL,
+    anchor_key       TEXT NOT NULL,
     latitude         REAL NOT NULL,
     longitude        REAL NOT NULL,
     occurred_at      TEXT NOT NULL,
