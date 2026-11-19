@@ -98,6 +98,26 @@ spec:
       labels:
         app: aggregate
     spec:
+      initContainers:
+        - name: wait-for-mongo
+          image: percona/percona-server-mongodb:8.0.4-1-multi
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: aggregate-env
+            - secretRef:
+                name: mongo-cluster-secrets
+          env:
+            - name: MONGO_URI
+              value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until mongosh "$MONGO_URI" --quiet --eval 'const dbName = process.env.MONGO_DB_NAME || "bnpb"; const colName = process.env.MONGO_COLLECTION || "hazard_events"; quit(db.getSiblingDB(dbName).getCollection("_cluster_setup").findOne({ _id: `${dbName}.${colName}`, rangesReady: true }) ? 0 : 1)' >/dev/null 2>&1; do
+                echo "Waiting for mongo-cluster-init to finish sharding setup..."
+                sleep 3
+              done
       containers:
         - name: aggregate
           image: aat-aggregate:latest
@@ -108,6 +128,11 @@ spec:
           envFrom:
             - configMapRef:
                 name: aggregate-env
+            - secretRef:
+                name: mongo-cluster-secrets
+          env:
+            - name: MONGO_URI
+              value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin
           readinessProbe:
             grpc:
               port: 50051
