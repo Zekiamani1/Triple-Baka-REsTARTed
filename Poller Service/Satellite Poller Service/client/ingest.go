@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	domain "satellitepoller/processing"
+	"satellitepoller/domain"
 	"strconv"
 	"strings"
 	"time"

@@ -1,5 +1,3 @@
-// Package domain contains the internal data models used by the Satellite Poller.
-// These models are independent of the SSE, SQLite, and Kafka representations.
 package domain
 
 import (
