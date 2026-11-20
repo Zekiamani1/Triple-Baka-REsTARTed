@@ -91,7 +91,7 @@ metadata:
   labels:
     app: aggregate
 spec:
-  replicas: 2
+  replicas: 4
   selector:
     matchLabels:
       app: aggregate
@@ -112,7 +112,7 @@ spec:
                 name: mongo-cluster-secrets
           env:
             - name: MONGO_URI
-              value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin
+              value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin&readPreference=secondaryPreferred
           command:
             - /bin/sh
             - -c
@@ -123,7 +123,7 @@ spec:
               done
       containers:
         - name: aggregate
-          image: aat-aggregate:latest
+          image: triple-baka-restarted-aggregate:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 50051
@@ -135,7 +135,7 @@ spec:
                 name: mongo-cluster-secrets
           env:
             - name: MONGO_URI
-              value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin
+              value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin&readPreference=secondaryPreferred
           readinessProbe:
             grpc:
               port: 50051
@@ -148,7 +148,7 @@ spec:
               port: 50051
             initialDelaySeconds: 60
             periodSeconds: 15
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 10
 ---
 apiVersion: apps/v1
@@ -169,7 +169,7 @@ spec:
     spec:
       containers:
         - name: bmkg-poller
-          image: aat-bmkg-poller:latest
+          image: triple-baka-restarted-bmkg-poller:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8085
@@ -212,7 +212,7 @@ spec:
     spec:
       containers:
         - name: pvmbg-poller
-          image: aat-pvmbg-poller:latest
+          image: triple-baka-restarted-pvmbg-poller:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8086
@@ -255,7 +255,7 @@ spec:
     spec:
       containers:
         - name: event-consumer
-          image: aat-event-consumer:latest
+          image: triple-baka-restarted-event-consumer:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8087
@@ -298,7 +298,7 @@ spec:
     spec:
       containers:
         - name: alert-consumer
-          image: aat-alert-consumer:latest
+          image: triple-baka-restarted-alert-consumer:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8088
@@ -404,7 +404,7 @@ metadata:
   labels:
     app: gateway
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
       app: gateway

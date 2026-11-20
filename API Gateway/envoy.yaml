@@ -29,82 +29,26 @@ static_resources:
                             body: { inline_string: "UP" }
                         - match: { path: "/auth/token" }
                           route: { cluster: auth_service }
-                          typed_per_filter_config:
-                            envoy.filters.http.local_ratelimit:
-                              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
-                              stat_prefix: rl_auth_token
-                              token_bucket:
-                                max_tokens: 10
-                                tokens_per_fill: 10
-                                fill_interval: 60s
-                              filter_enabled:
-                                runtime_key: rl_auth_token_enabled
-                                default_value: { numerator: 100, denominator: HUNDRED }
-                              filter_enforced:
-                                runtime_key: rl_auth_token_enforced
-                                default_value: { numerator: 100, denominator: HUNDRED }
-                              response_headers_to_add:
-                                - append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                                  header: { key: x-local-rate-limit, value: "true" }
-                              enable_x_ratelimit_headers: DRAFT_VERSION_03
                         - match: { path: "/auth/refresh" }
                           route: { cluster: auth_service }
-                          typed_per_filter_config:
-                            envoy.filters.http.local_ratelimit:
-                              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
-                              stat_prefix: rl_auth_refresh
-                              token_bucket:
-                                max_tokens: 30
-                                tokens_per_fill: 30
-                                fill_interval: 60s
-                              filter_enabled:
-                                runtime_key: rl_auth_refresh_enabled
-                                default_value: { numerator: 100, denominator: HUNDRED }
-                              filter_enforced:
-                                runtime_key: rl_auth_refresh_enforced
-                                default_value: { numerator: 100, denominator: HUNDRED }
-                              response_headers_to_add:
-                                - append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                                  header: { key: x-local-rate-limit, value: "true" }
-                              enable_x_ratelimit_headers: DRAFT_VERSION_03
                         - match: { prefix: "/.well-known/jwks.json"}
                           route: { cluster: auth_service }
                         - match: { prefix: "/aggregate/"}
                           route:
                             cluster: aggregator_service
+                            timeout: 30s
                             retry_policy:
                               retry_on: connect-failure,refused-stream,unavailable,reset,5xx
-                              num_retries: 3
-                              per_try_timeout: 5s
+                              num_retries: 1
+                              per_try_timeout: 10s
                           typed_per_filter_config:
                             envoy.filters.http.jwt_authn:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
                               requirement_name: auth_provider
-                            envoy.filters.http.local_ratelimit:
-                              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
-                              stat_prefix: rl_aggregate
-                              token_bucket:
-                                max_tokens: 50
-                                tokens_per_fill: 50
-                                fill_interval: 10s
-                              filter_enabled:
-                                runtime_key: rl_aggregate_enabled
-                                default_value: { numerator: 100, denominator: HUNDRED }
-                              filter_enforced:
-                                runtime_key: rl_aggregate_enforced
-                                default_value: { numerator: 100, denominator: HUNDRED }
-                              response_headers_to_add:
-                                - append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                                  header: { key: x-local-rate-limit, value: "true" }
-                              enable_x_ratelimit_headers: DRAFT_VERSION_03
                 http_filters:
                   - name: envoy.filters.http.cors
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors
-                  - name: envoy.filters.http.local_ratelimit
-                    typed_config:
-                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
-                      stat_prefix: http_local_rate_limiter
                   - name: envoy.filters.http.jwt_authn
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
@@ -174,16 +118,20 @@ static_resources:
     - name: aggregator_service
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
-      connect_timeout: 2s
+      connect_timeout: 5s
       dns_lookup_family: V4_ONLY
       dns_refresh_rate: 2s
-      common_lb_config:
-        healthy_panic_threshold:
-          value: 0
+      circuit_breakers:
+        thresholds:
+          - priority: DEFAULT
+            max_connections: 10000
+            max_pending_requests: 20000
+            max_requests: 20000
+            max_retries: 2000
       health_checks:
-        - timeout: 2s
-          interval: 2s
-          unhealthy_threshold: 1
+        - timeout: 5s
+          interval: 10s
+          unhealthy_threshold: 3
           healthy_threshold: 1
           grpc_health_check:
             service_name: hazard.Aggregate
