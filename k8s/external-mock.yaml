@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: bmkg
-          image: aat-bmkg:latest
+          image: triple-baka-restarted-bmkg:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8081
@@ -70,7 +70,7 @@ spec:
     spec:
       containers:
         - name: pvmbg
-          image: aat-pvmbg:latest
+          image: triple-baka-restarted-pvmbg:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8082
