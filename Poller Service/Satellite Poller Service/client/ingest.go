@@ -8,6 +8,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,7 +26,8 @@ var (
 	ErrOffsetGap = errors.New("satellite feed offset gap detected")
 
 	// self-explanatory, kalau offset negatif
-	ErrInvalidOffset = errors.New("invalid satellite feed offset")
+	ErrInvalidOffset  = errors.New("invalid satellite feed offset")
+	ErrOffsetMismatch = errors.New("satellite feed payload offset does not match SSE id")
 )
 
 // Repository must persist an inbox event and its feed checkpoint atomically.
@@ -165,7 +167,9 @@ func (s *Service) Run(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-
+			if err := validatePayloadOffset(event.Data, offset); err != nil {
+				return err
+			}
 			if hasCheckpoint && offset <= lastOffset {
 				return nil
 			}
@@ -208,7 +212,9 @@ func (s *Service) Run(ctx context.Context) error {
 			return nil
 		}
 
-		if errors.Is(readErr, ErrOffsetGap) || errors.Is(readErr, ErrInvalidOffset) {
+		if errors.Is(readErr, ErrOffsetGap) ||
+			errors.Is(readErr, ErrInvalidOffset) ||
+			errors.Is(readErr, ErrOffsetMismatch) {
 			return fmt.Errorf("satellite stream contract violation: %w", readErr)
 		}
 
@@ -298,4 +304,37 @@ func wait(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// validatePayloadOffset ensures the JSON event offset, when supplied by the
+// feed, agrees with the authoritative SSE id. Some heartbeat frames may omit
+// the JSON field; in that case the SSE id remains the checkpoint offset.
+func validatePayloadOffset(payload json.RawMessage, sseOffset int64) error {
+	var envelope struct {
+		Offset json.RawMessage `json:"offset"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return fmt.Errorf("decode feed event payload: %w", err)
+	}
+	if len(envelope.Offset) == 0 || string(envelope.Offset) == "null" {
+		return nil
+	}
+
+	var payloadOffset int64
+	if err := json.Unmarshal(envelope.Offset, &payloadOffset); err != nil {
+		var text string
+		if stringErr := json.Unmarshal(envelope.Offset, &text); stringErr != nil {
+			return fmt.Errorf("%w: payload offset must be an integer or numeric string", ErrInvalidOffset)
+		}
+		parsed, parseErr := parseOffset(text)
+		if parseErr != nil {
+			return parseErr
+		}
+		payloadOffset = parsed
+	}
+
+	if payloadOffset != sseOffset {
+		return fmt.Errorf("%w: SSE id=%d payload offset=%d", ErrOffsetMismatch, sseOffset, payloadOffset)
+	}
+	return nil
 }

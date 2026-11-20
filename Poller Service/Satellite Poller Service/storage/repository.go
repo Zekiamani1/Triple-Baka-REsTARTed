@@ -450,7 +450,7 @@ func upsertCluster(ctx context.Context, tx *sql.Tx, c domain.FireCluster) error 
 			detection_keys_json = excluded.detection_keys_json,
 			revision = excluded.revision,
 			updated_at = excluded.updated_at
-	`, c.ID, c.SourceRefID, string(c.Status), c.Latitude, c.Longitude,
+	`, c.ID, c.AnchorKey, c.SourceRefID, string(c.Status), c.Latitude, c.Longitude,
 		formatDBTime(c.OccurredAt), c.DetectionCount, c.TotalFRPMW, c.Severity,
 		satellites, c.MaxConfidence, keys, c.Revision, formatDBTime(c.UpdatedAt))
 	if err != nil {
