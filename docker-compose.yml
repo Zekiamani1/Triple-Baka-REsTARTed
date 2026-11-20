@@ -131,6 +131,20 @@ services:
       timeout: 3s
       retries: 3
     restart: unless-stopped
+  satellite-poller:
+    build: "./Poller Service/Satellite Poller Service"
+    env_file: "./Poller Service/Satellite Poller Service/.env"
+    depends_on:
+      kafka-init-ingest:
+        condition: service_completed_successfully
+    volumes:
+      - satellite-poller-data:/var/lib/satellite-poller
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8087/health >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
   event-consumer:
     build: "./Event Consumer"
     env_file: "./Event Consumer/.env"
@@ -221,6 +235,7 @@ services:
       auth-service:
         condition: service_healthy
 volumes:
+  satellite-poller-data:
   kafka-data:
   bmkg-data:
   pvmbg-data:
