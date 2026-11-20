@@ -164,7 +164,9 @@ services:
       - --replication-factor
       - "1"
   aggregate:
-    build: "./Aggregate Service"
+    build: 
+        context: "./Aggregate Service"
+        network: host
     expose:
       - "50051"
     deploy:
@@ -191,7 +193,9 @@ services:
       timeout: 3s
       retries: 10
   bmkg:
-    build: "./External System/BMKG"
+    build:
+      context: "./External System/BMKG"
+      network: host
     ports:
       - "8081:8081"
     env_file: "./External System/BMKG/.env"
@@ -203,7 +207,9 @@ services:
       timeout: 3s
       retries: 20
   pvmbg:
-    build: "./External System/PVMBG"
+    build:
+      context: "./External System/PVMBG"
+      network: host
     ports:
       - "8082:8082"
     env_file: "./External System/PVMBG/.env"
@@ -215,7 +221,9 @@ services:
       timeout: 3s
       retries: 20
   bmkg-poller:
-    build: "./Poller Service/BMKG Poller Service"
+    build:
+      context: "./Poller Service/BMKG Poller Service"
+      network: host
     env_file: "./Poller Service/BMKG Poller Service/.env"
     depends_on:
       bmkg:
@@ -229,7 +237,9 @@ services:
       retries: 3
     restart: unless-stopped
   pvmbg-poller:
-    build: "./Poller Service/PVMBG Poller Service"
+    build:
+      context: "./Poller Service/PVMBG Poller Service"
+      network: host
     env_file: "./Poller Service/PVMBG Poller Service/.env"
     depends_on:
       pvmbg:
@@ -243,7 +253,9 @@ services:
       retries: 3
     restart: unless-stopped
   event-consumer:
-    build: "./Event Consumer"
+    build: 
+      context: "./Event Consumer"
+      network: host
     env_file: "./Event Consumer/.env"
     depends_on:
       kafka-init:
@@ -255,7 +267,9 @@ services:
       timeout: 3s
       retries: 10
   alert-consumer:
-    build: "./Alert Consumer"
+    build:
+      context: "./Alert Consumer"
+      network: host
     env_file: "./Alert Consumer/.env"
     depends_on:
       kafka-init:
@@ -281,7 +295,9 @@ services:
       timeout: 3s
       retries: 15
   auth-keygen:
-    build: ./Auth Service
+    build: 
+      context: ./Auth Service
+      network: host
     image: auth-service:dev
     command: ["./auth-service", "keygen"]
     env_file: ./Auth Service/.env
@@ -289,7 +305,9 @@ services:
       - auth-keys:/app/keys
     restart: "no"
   auth-seed:
-    build: ./Auth Service
+    build:
+      context: ./Auth Service
+      network: host
     image: auth-service:dev
     command: ["./seed"]
     env_file: ./Auth Service/.env
@@ -298,7 +316,9 @@ services:
         condition: service_healthy
     restart: "no"
   auth-service:
-    build: ./Auth Service
+    build:
+      context: ./Auth Service
+      network: host
     image: auth-service:dev
     container_name: auth-service
     env_file: ./Auth Service/.env
