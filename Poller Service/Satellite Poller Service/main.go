@@ -521,23 +521,41 @@ func (p *Publisher) publishPending(ctx context.Context) error {
 		}
 
 		messages := make([]kafka.Message, 0, len(events))
+
 		for _, event := range events {
 			payload, err := p.encoder.Encode(event)
 			if err != nil {
 				p.recordBatchFailure(ctx, events, err)
-				return fmt.Errorf("encode outbox event %q: %w", event.EventID, err)
+				return fmt.Errorf(
+					"encode outbox event %q: %w",
+					event.EventID,
+					err,
+				)
+			}
+
+			headers := []kafka.Header{
+				{Key: "event_id", Value: []byte(event.EventID)},
+				{Key: "source_ref_id", Value: []byte(event.SourceRefID)},
+				{
+					Key:   "revision",
+					Value: []byte(strconv.FormatInt(event.Revision, 10)),
+				},
+			}
+
+			// A tombstone has no JSON payload, so do not label it
+			// as application/json.
+			if payload != nil {
+				headers = append(headers, kafka.Header{
+					Key:   "content-type",
+					Value: []byte("application/json"),
+				})
 			}
 
 			messages = append(messages, kafka.Message{
-				Key:   []byte(event.SourceRefID),
-				Value: payload,
-				Time:  event.CreatedAt,
-				Headers: []kafka.Header{
-					{Key: "content-type", Value: []byte("application/json")},
-					{Key: "event_id", Value: []byte(event.EventID)},
-					{Key: "source_ref_id", Value: []byte(event.SourceRefID)},
-					{Key: "revision", Value: []byte(strconv.FormatInt(event.Revision, 10))},
-				},
+				Key:     []byte(event.SourceRefID),
+				Value:   payload,
+				Time:    event.CreatedAt,
+				Headers: headers,
 			})
 		}
 
@@ -591,34 +609,67 @@ func (HazardProtoJSONEncoder) Encode(
 	var envelope processing.OutboxEnvelope
 
 	if err := json.Unmarshal(event.Payload, &envelope); err != nil {
-		return nil, fmt.Errorf("decode outbox envelope: %w", err)
+		return nil, fmt.Errorf(
+			"decode outbox envelope: %w", err,
+		)
 	}
 
-	if envelope.Operation != "upsert" {
+	if envelope.SourceRefID == "" {
+		return nil, fmt.Errorf("outbox envelope has no source_ref_id")
+	}
+
+	if envelope.SourceRefID != event.SourceRefID {
+		return nil, fmt.Errorf("outbox source_ref_id mismatch")
+	}
+
+	if envelope.Revision != event.Revision {
+		return nil, fmt.Errorf("outbox revision mismatch")
+	}
+
+	switch envelope.Operation {
+
+	case "upsert":
+		if envelope.Hazard == nil {
+			return nil, fmt.Errorf("upsert envelope has no hazard")
+		}
+
+		if envelope.Hazard.SourceRefID != envelope.SourceRefID {
+			return nil, fmt.Errorf("hazard source_ref_id mismatch")
+		}
+
+		hazard, err := toProtoHazard(*envelope.Hazard)
+		if err != nil {
+			return nil, err
+		}
+
+		payload, err := protojson.MarshalOptions{
+			UseProtoNames: true,
+		}.Marshal(hazard)
+
+		if err != nil {
+			return nil, fmt.Errorf(
+				"marshal Protobuf JSON: %w", err,
+			)
+		}
+
+		return payload, nil
+
+	case "retract":
+		if envelope.Hazard != nil {
+			return nil, fmt.Errorf(
+				"retract envelope must not contain a hazard",
+			)
+		}
+
+		// nil value means Kafka tombstone.
+		return nil, nil
+
+	default:
 		return nil, fmt.Errorf(
 			"unsupported Kafka operation: %s",
 			envelope.Operation,
 		)
 	}
-
-	if envelope.Hazard == nil {
-		return nil, fmt.Errorf("upsert envelope has no hazard")
-	}
-
-	hazard, err := toProtoHazard(*envelope.Hazard)
-	if err != nil {
-		return nil, err
-	}
-
-	payload, err := protojson.MarshalOptions{
-		UseProtoNames: true,
-	}.Marshal(hazard)
-
-	if err != nil {
-		return nil, fmt.Errorf("marshal Protobuf JSON: %w", err)
-	}
-
-	return payload, nil
 }
 
 func newHealthServer(port string, db interface{ PingContext(context.Context) error }) *http.Server {

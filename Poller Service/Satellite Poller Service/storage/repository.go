@@ -255,7 +255,7 @@ func (r *Repository) LoadClusters(ctx context.Context) ([]domain.FireCluster, er
 		var status, occurredAt, updatedAt string
 		var satellitesJSON, keysJSON []byte
 		if err := rows.Scan(
-			&c.ID, &c.SourceRefID, &status, &c.Latitude, &c.Longitude,
+			&c.ID, &c.AnchorKey, &c.SourceRefID, &status, &c.Latitude, &c.Longitude,
 			&occurredAt, &c.DetectionCount, &c.TotalFRPMW, &c.Severity,
 			&satellitesJSON, &c.MaxConfidence, &keysJSON, &c.Revision, &updatedAt,
 		); err != nil {
@@ -332,6 +332,9 @@ func (r *Repository) CommitProcessing(
 		return fmt.Errorf("prepare cluster membership insert: %w", err)
 	}
 	for _, c := range clusters {
+		if c.Status != domain.ClusterActive {
+			continue
+		}
 		for _, key := range c.DetectionKeys {
 			if _, err := memberStmt.ExecContext(ctx, c.ID, key); err != nil {
 				_ = memberStmt.Close()
@@ -431,7 +434,7 @@ func upsertCluster(ctx context.Context, tx *sql.Tx, c domain.FireCluster) error 
 			cluster_id, anchor_key, source_ref_id, status, latitude, longitude, occurred_at,
 			detection_count, total_frp_mw, severity, satellites_json,
 			max_confidence, detection_keys_json, revision, updated_at
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(cluster_id) DO UPDATE SET
 			anchor_key = excluded.anchor_key,
 			source_ref_id = excluded.source_ref_id,
@@ -509,7 +512,10 @@ func (r *Repository) GetPendingOutboxEvents(ctx context.Context, limit int) ([]d
 		       attempts, created_at, published_at
 		FROM outbox_events
 		WHERE status = 'pending'
-		ORDER BY created_at ASC, event_id ASC
+		ORDER BY source_ref_id ASC,
+					revision ASC,
+					created_at ASC,
+					event_id ASC
 		LIMIT ?
 	`, limit)
 	if err != nil {

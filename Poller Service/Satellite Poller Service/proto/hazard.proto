@@ -12,6 +12,7 @@ enum Source {
     BMKG = 1;
     PVMBG = 2;
     SATELIT = 3;
+    SENSOR_PANTAI = 4;
 }
 
 enum HazardType {
@@ -19,6 +20,7 @@ enum HazardType {
     SEISMIC = 1;
     VOLCANIC = 2;
     WILDFIRE = 3;
+    COASTAL = 4;
 }
 
 enum Severity {

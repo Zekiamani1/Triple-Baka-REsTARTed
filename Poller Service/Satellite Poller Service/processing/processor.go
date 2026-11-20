@@ -250,14 +250,19 @@ func (p *Processor) applyEvent(event domain.InboxEvent, detections map[string]do
 			return false, false, false, false, err
 		}
 		old, exists := detections[key]
-		var updated domain.Detection
-		if exists {
-			updated, err = applyDetectionPatch(old, event.RawPayload, event.ReceivedAt)
-		} else {
-			// If the feed replays an update before the original detection, it must
-			// carry a complete detection object so the state can be reconstructed.
-			updated, err = decodeDetection(event.RawPayload, event.ReceivedAt)
+		if !exists {
+			return false, false, false, false, fmt.Errorf(
+				"%w: update references unknown detection %q",
+				ErrMalformedPayload,
+				key,
+			)
 		}
+
+		updated, err := applyDetectionPatch(
+			old,
+			event.RawPayload,
+			event.ReceivedAt,
+		)
 		if err != nil {
 			return false, false, false, false, fmt.Errorf("apply detection update %q: %w", key, err)
 		}
@@ -293,12 +298,15 @@ func (p *Processor) classifyDetection(d domain.Detection, existing map[string]do
 		return domain.DetectionFiltered, true, false
 	}
 	maxSeen := time.Time{}
-	for _, old := range existing {
-		if old.EventTime.After(maxSeen) {
-			maxSeen = old.EventTime
+	for _, d := range existing {
+		// Include all statuses, including retracted and late.
+		if d.EventTime.After(maxSeen) {
+			maxSeen = d.EventTime
 		}
 	}
-	if !maxSeen.IsZero() && d.EventTime.Before(maxSeen.Add(-p.opts.MaxLateness)) {
+
+	watermark := maxSeen.Add(-p.opts.MaxLateness)
+	if !watermark.IsZero() && d.EventTime.Before(watermark) {
 		return domain.DetectionLate, false, true
 	}
 	return domain.DetectionActive, false, false
@@ -402,40 +410,78 @@ func updateReferenceKey(raw json.RawMessage) (string, error) {
 	return d.Key, nil
 }
 
-func applyDetectionPatch(old domain.Detection, raw json.RawMessage, receivedAt time.Time) (domain.Detection, error) {
+func applyDetectionPatch(
+	old domain.Detection,
+	raw json.RawMessage,
+	receivedAt time.Time,
+) (domain.Detection, error) {
+
+	// Recover the previously stored detection.
 	base, err := decodePayloadObject(old.RawPayload)
 	if err != nil {
-		return domain.Detection{}, fmt.Errorf("decode stored detection: %w", err)
+		return domain.Detection{}, fmt.Errorf(
+			"decode stored detection: %w", err,
+		)
 	}
+
+	// Original detection events wrap the detection in "detection".
 	if nested, ok := base["detection"]; ok {
 		base, err = decodePayloadObject(nested)
 		if err != nil {
 			return domain.Detection{}, err
 		}
 	}
-	patch, err := decodePayloadObject(raw)
+
+	// Decode the update envelope.
+	update, err := decodePayloadObject(raw)
 	if err != nil {
 		return domain.Detection{}, err
 	}
-	if nested, ok := patch["detection"]; ok {
-		patch, err = decodePayloadObject(nested)
-		if err != nil {
-			return domain.Detection{}, err
-		}
+
+	// Extract the actual changes.
+	changesRaw, ok := update["changes"]
+	if !ok {
+		return domain.Detection{}, fmt.Errorf(
+			"%w: update is missing changes",
+			ErrMalformedPayload,
+		)
 	}
-	for key, value := range patch {
-		switch key {
-		case "detection_key", "previous_detection_key", "key":
-			continue
-		default:
-			base[key] = value
-		}
+
+	changes, err := decodePayloadObject(changesRaw)
+	if err != nil {
+		return domain.Detection{}, fmt.Errorf(
+			"decode update changes: %w", err,
+		)
 	}
+
+	if len(changes) == 0 {
+		return domain.Detection{}, fmt.Errorf(
+			"%w: update contains no changes",
+			ErrMalformedPayload,
+		)
+	}
+
+	// Apply only changed fields.
+	for key, value := range changes {
+		base[key] = append(json.RawMessage(nil), value...)
+	}
+
+	// Rebuild the complete detection and normalize it again.
 	merged, err := json.Marshal(base)
 	if err != nil {
-		return domain.Detection{}, fmt.Errorf("merge detection update: %w", err)
+		return domain.Detection{}, fmt.Errorf(
+			"merge detection update: %w", err,
+		)
 	}
-	return decodeDetection(merged, receivedAt)
+
+	updated, err := decodeDetection(merged, receivedAt)
+	if err != nil {
+		return domain.Detection{}, fmt.Errorf(
+			"decode updated detection: %w", err,
+		)
+	}
+
+	return updated, nil
 }
 
 func decodeDetectionKey(raw json.RawMessage) (string, error) {

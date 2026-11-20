@@ -173,29 +173,59 @@ func (c *Client) ReadEvents(ctx context.Context, body io.Reader, handle func(Eve
 	}
 
 	dispatch := func() error {
-		if data.Len() == 0 {
+		// Ignore an empty SSE frame or a comment-only frame.
+		if eventID == "" && eventType == "" && data.Len() == 0 {
 			resetEvent()
 			return nil
 		}
+
 		if eventID == "" {
 			return errors.New("SSE event is missing its id/offset")
 		}
+
 		if eventType == "" {
 			return errors.New("SSE event is missing its event type")
 		}
 
-		payload := bytes.TrimSuffix(data.Bytes(), []byte("\n"))
+		payload := bytes.TrimSpace(
+			bytes.TrimSuffix(data.Bytes(), []byte("\n")),
+		)
+
+		if len(payload) == 0 {
+			if eventType != "heartbeat" {
+				return fmt.Errorf(
+					"SSE event %q at offset %q has no data",
+					eventType,
+					eventID,
+				)
+			}
+
+			// Empty heartbeat is represented internally as an empty JSON object.
+			payload = []byte("{}")
+		}
+
 		event := Event{
 			Offset: eventID,
 			Type:   eventType,
 			Data:   append(json.RawMessage(nil), payload...),
 		}
+
 		if !json.Valid(event.Data) {
-			return fmt.Errorf("SSE event at offset %q contains invalid JSON", event.Offset)
+			return fmt.Errorf(
+				"SSE event at offset %q contains invalid JSON",
+				event.Offset,
+			)
 		}
+
 		if err := handle(event); err != nil {
-			return fmt.Errorf("handle SSE event at offset %q (%s): %w", event.Offset, event.Type, err)
+			return fmt.Errorf(
+				"handle SSE event at offset %q (%s): %w",
+				event.Offset,
+				event.Type,
+				err,
+			)
 		}
+
 		resetEvent()
 		return nil
 	}

@@ -30,6 +30,7 @@ const (
 	Source_BMKG               Source = 1
 	Source_PVMBG              Source = 2
 	Source_SATELIT            Source = 3
+	Source_SENSOR_PANTAI      Source = 4
 )
 
 // Enum value maps for Source.
@@ -39,12 +40,14 @@ var (
 		1: "BMKG",
 		2: "PVMBG",
 		3: "SATELIT",
+		4: "SENSOR_PANTAI",
 	}
 	Source_value = map[string]int32{
 		"SOURCE_UNSPECIFIED": 0,
 		"BMKG":               1,
 		"PVMBG":              2,
 		"SATELIT":            3,
+		"SENSOR_PANTAI":      4,
 	}
 )
 
@@ -82,6 +85,7 @@ const (
 	HazardType_SEISMIC                 HazardType = 1
 	HazardType_VOLCANIC                HazardType = 2
 	HazardType_WILDFIRE                HazardType = 3
+	HazardType_COASTAL                 HazardType = 4
 )
 
 // Enum value maps for HazardType.
@@ -91,12 +95,14 @@ var (
 		1: "SEISMIC",
 		2: "VOLCANIC",
 		3: "WILDFIRE",
+		4: "COASTAL",
 	}
 	HazardType_value = map[string]int32{
 		"HAZARD_TYPE_UNSPECIFIED": 0,
 		"SEISMIC":                 1,
 		"VOLCANIC":                2,
 		"WILDFIRE":                3,
+		"COASTAL":                 4,
 	}
 )
 
@@ -328,18 +334,20 @@ const file_proto_hazard_proto_rawDesc = "" +
 	"ingestedAt\x127\n" +
 	"\n" +
 	"attributes\x18\v \x01(\v2\x17.google.protobuf.StructR\n" +
-	"attributes*B\n" +
+	"attributes*U\n" +
 	"\x06Source\x12\x16\n" +
 	"\x12SOURCE_UNSPECIFIED\x10\x00\x12\b\n" +
 	"\x04BMKG\x10\x01\x12\t\n" +
 	"\x05PVMBG\x10\x02\x12\v\n" +
-	"\aSATELIT\x10\x03*R\n" +
+	"\aSATELIT\x10\x03\x12\x11\n" +
+	"\rSENSOR_PANTAI\x10\x04*_\n" +
 	"\n" +
 	"HazardType\x12\x1b\n" +
 	"\x17HAZARD_TYPE_UNSPECIFIED\x10\x00\x12\v\n" +
 	"\aSEISMIC\x10\x01\x12\f\n" +
 	"\bVOLCANIC\x10\x02\x12\f\n" +
-	"\bWILDFIRE\x10\x03*R\n" +
+	"\bWILDFIRE\x10\x03\x12\v\n" +
+	"\aCOASTAL\x10\x04*R\n" +
 	"\bSeverity\x12\x18\n" +
 	"\x14SEVERITY_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +
