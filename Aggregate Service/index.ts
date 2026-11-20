@@ -54,7 +54,7 @@ const healthProto = grpc.loadPackageDefinition(healthPackageDefinition) as any;
 const mongoClient = new MongoClient(mongo.uri, {
     retryWrites: true,
     writeConcern: { w: "majority", journal: true, wtimeoutMS: 10000 },
-    readConcern: { level: "majority" },
+    readConcern: { level: "local" },
     serverSelectionTimeoutMS: 15000,
 });
 
@@ -267,6 +267,51 @@ async function aggregateEvent(call: grpc.ServerUnaryCall<any, any>, callback: gr
     );
 }
 
+const LIST_CACHE_TTL_MS = 2000;
+const LIST_CACHE_MAX_ENTRIES = 500;
+const listHazardsCache = new Map<string, { expiresAt: number; payload: { hazards: any[]; total: number } }>();
+const listHazardsInFlight = new Map<string, Promise<{ hazards: any[]; total: number }>>();
+
+async function fetchListHazardsPayload(
+    filter: Record<string, unknown>,
+    limit: number,
+    offset: number,
+    span: any,
+): Promise<{ hazards: any[]; total: number }> {
+    const isUnfiltered = Object.keys(filter).length === 0;
+    const [hazards, total] = await Promise.all([
+        trackMongoOp("find", () =>
+            collection.find(filter, {
+                projection: { _id: 0, partition_key: 0, published: 0, published_at: 0 }
+            })
+            .sort({ ingested_at: -1, source: 1, source_ref_id: 1 })
+            .skip(offset)
+            .limit(limit)
+            .toArray()
+        ),
+        trackMongoOp(isUnfiltered ? "estimatedDocumentCount" : "countDocuments", () =>
+            isUnfiltered
+                ? collection.estimatedDocumentCount()
+                : collection.countDocuments(filter)
+        ),
+    ]);
+
+    span.setAttributes({
+        "query.result_count": hazards.length,
+        "query.total_count": total,
+    });
+
+    return {
+        hazards: hazards.map((h: any) => ({
+            ...h,
+            occurred_at: toProtoTimestamp(h.occurred_at),
+            ingested_at: toProtoTimestamp(h.ingested_at),
+            attributes: toStruct(h.attributes),
+        })),
+        total,
+    };
+}
+
 async function listHazards(call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) {
     const start = performance.now();
     await trace.getTracer(SCOPE_NAME).startActiveSpan(
@@ -307,39 +352,42 @@ async function listHazards(call: grpc.ServerUnaryCall<any, any>, callback: grpc.
                     "query.offset": offset,
                 });
 
-                const [hazards, total] = await Promise.all([
-                    trackMongoOp("find", () =>
-                        collection.find(filter, {
-                            projection: { _id: 0, partition_key: 0, published: 0, published_at: 0 }
-                        })
-                        .sort({ ingested_at: -1, source: 1, source_ref_id: 1 })
-                        .skip(offset)
-                        .limit(limit)
-                        .toArray()
-                    ),
-                    trackMongoOp("countDocuments", () =>
-                        collection.countDocuments(filter)
-                    ),
-                ]);
+                const cacheKey = `${filter.source ?? ""}|${filter.hazard_type ?? ""}|${filter.severity ?? ""}|${limit}|${offset}`;
+                const now = Date.now();
+                const cached = listHazardsCache.get(cacheKey);
+                let payload: { hazards: any[]; total: number };
 
-                span.setAttributes({
-                    "query.result_count": hazards.length,
-                    "query.total_count": total,
-                });
+                if (cached && cached.expiresAt > now) {
+                    span.setAttribute("query.cache_hit", true);
+                    payload = cached.payload;
+                } else {
+                    span.setAttribute("query.cache_hit", false);
+                    let pending = listHazardsInFlight.get(cacheKey);
+                    if (!pending) {
+                        pending = fetchListHazardsPayload(filter, limit, offset, span)
+                            .then((res) => {
+                                if (listHazardsCache.size >= LIST_CACHE_MAX_ENTRIES) {
+                                    listHazardsCache.clear();
+                                }
+                                listHazardsCache.set(cacheKey, {
+                                    expiresAt: Date.now() + LIST_CACHE_TTL_MS,
+                                    payload: res,
+                                });
+                                return res;
+                            })
+                            .finally(() => {
+                                listHazardsInFlight.delete(cacheKey);
+                            });
+                        listHazardsInFlight.set(cacheKey, pending);
+                    }
+                    payload = await pending;
+                }
 
                 const durationMs = performance.now() - start;
                 recordGrpcRequest("ListHazards", "OK", durationMs);
                 span.setStatus({ code: SpanStatusCode.OK });
 
-                callback(null, {
-                    hazards: hazards.map((h: any) => ({
-                        ...h,
-                        occurred_at: toProtoTimestamp(h.occurred_at),
-                        ingested_at: toProtoTimestamp(h.ingested_at),
-                        attributes: toStruct(h.attributes),
-                    })),
-                    total,
-                });
+                callback(null, payload);
             } catch (error: any) {
                 const durationMs = performance.now() - start;
                 recordGrpcRequest("ListHazards", "INTERNAL", durationMs);
