@@ -35,7 +35,6 @@ import {
   type UnprocessedMessageDoc,
 } from "./dlqAndFieldReports";
 import { queryWithPartialFallback } from "./partialQuery";
-import { validateFencingToken } from "./leaseServer";
 import type { Collection } from "mongodb";
 import type { Server as HttpServer } from "node:http";
 
@@ -127,10 +126,7 @@ async function trackMongoOp<T = any>(operation: string, fn: () => Promise<T>): P
     }
 }
 
-async function ingestHazard(
-    hazardEvent: any,
-    opts?: { upsert?: boolean; fencingToken?: string },
-): Promise<void> {
+async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean }): Promise<void> {
     const start = performance.now();
     const source = String(hazardEvent?.source ?? "UNKNOWN");
     const hazardType = String(hazardEvent?.hazard_type ?? "UNKNOWN");
@@ -159,18 +155,6 @@ async function ingestHazard(
                 if (typeof hazardEvent.source !== "string" || !hazardEvent.source.trim() ||
                     typeof hazardEvent.source_ref_id !== "string" || !hazardEvent.source_ref_id.trim()) {
                     throw new Error("source and source_ref_id must be non-empty strings");
-                }
-                if (opts?.fencingToken !== undefined) {
-                    const validToken = await validateFencingToken(
-                        mongoClient.db(mongo.dbName),
-                        hazardEvent.source,
-                        opts.fencingToken,
-                    );
-                    if (!validToken) {
-                        recordIngestEvent(source, hazardType, severity, "stale_fencing_token", performance.now() - start);
-                        span.setStatus({ code: SpanStatusCode.OK });
-                        return;
-                    }
                 }
                 const identity = {
                     // Matches the pre-split hash ranges configured by init-cluster.js.
@@ -572,7 +556,7 @@ async function main () {
         publishFieldReport,
     });
     void runIngestConsumer({
-        onHazard: (hazard, meta) => ingestHazard(hazard, { fencingToken: meta?.fencingToken }),
+        onHazard: (hazard) => ingestHazard(hazard),
         onDlqMessage: async (dlq) => {
             await parkUnprocessedMessage(unprocessedCol, {
                 message_id: typeof dlq.message_id === "string" ? dlq.message_id : undefined,

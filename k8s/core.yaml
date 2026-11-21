@@ -198,7 +198,7 @@ metadata:
   labels:
     app: bmkg-poller
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: bmkg-poller
@@ -247,7 +247,7 @@ metadata:
   labels:
     app: pvmbg-poller
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: pvmbg-poller

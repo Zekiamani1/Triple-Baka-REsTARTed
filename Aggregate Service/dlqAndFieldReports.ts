@@ -3,7 +3,6 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Collection, Db, MongoClient } from "mongodb";
 import { handleAuditRoute } from "./auditServer";
 import { handleAnalyticsRoute } from "./analyticsServer";
-import { handleLeaseRoute } from "./leaseServer";
 import {
   MAX_PAYLOAD_BYTES,
   PoisonPillError,
@@ -335,10 +334,6 @@ export function startInternalHttpServer(deps: {
           collectionName: deps.collectionName,
         })
       ) {
-        return;
-      }
-
-      if (await handleLeaseRoute(req, res, url, deps.mongoClient.db(deps.dbName))) {
         return;
       }
       if (method === "GET" && url.pathname === "/health") {
