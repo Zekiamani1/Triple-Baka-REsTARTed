@@ -12,6 +12,30 @@ static_resources:
                 codec_type: AUTO
                 generate_request_id: true
                 preserve_external_request_id: true
+                tracing:
+                  provider:
+                    name: envoy.tracers.opentelemetry
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: otel_collector
+                        timeout: 1s
+                      service_name: api-gateway
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          timestamp: "%START_TIME%"
+                          method: "%REQ(:METHOD)%"
+                          path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+                          response_code: "%RESPONSE_CODE%"
+                          duration_ms: "%DURATION%"
+                          correlation_id: "%REQ(X-CORRELATION-ID)%"
+                          traceparent: "%REQ(TRACEPARENT)%"
+                          upstream_host: "%UPSTREAM_HOST%"
                 route_config:
                   name: local_route
                   virtual_hosts:
@@ -176,6 +200,22 @@ static_resources:
               - endpoint:
                   address:
                     socket_address: { address: aggregate-http, port_value: 50052 }
+    - name: otel_collector
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      connect_timeout: 2s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: otel_collector
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: otel-lgtm, port_value: 4317 }
 
 admin:
   address:

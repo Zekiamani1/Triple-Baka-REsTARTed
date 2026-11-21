@@ -36,6 +36,12 @@ spec:
           volumeMounts:
             - name: lgtm-data
               mountPath: /data
+            - name: grafana-dashboards-provider
+              mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml
+              subPath: dashboards.yaml
+            - name: grafana-dashboards-json
+              mountPath: /var/lib/grafana/dashboards/bnpb-overview.json
+              subPath: bnpb-overview.json
           readinessProbe:
             tcpSocket:
               port: 4317
@@ -54,3 +60,9 @@ spec:
         - name: lgtm-data
           persistentVolumeClaim:
             claimName: lgtm-data
+        - name: grafana-dashboards-provider
+          configMap:
+            name: grafana-dashboards-provider
+        - name: grafana-dashboards-json
+          configMap:
+            name: grafana-dashboards-json

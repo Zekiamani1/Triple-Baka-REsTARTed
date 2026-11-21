@@ -178,13 +178,24 @@ local function strip(hazard)
 end
 
 function envoy_on_request(request_handle)
-    local path = request_handle:headers():get(":path") or ""
+    local headers = request_handle:headers()
+    local path = headers:get(":path") or ""
+    local corr = headers:get("x-correlation-id")
+    if not corr or corr == "" then
+        corr = string.format("%08x-%04x-%04x", os.time(), math.random(0, 65535), math.random(0, 65535))
+        headers:replace("x-correlation-id", corr)
+    end
     request_handle:streamInfo():dynamicMetadata():set("field_filter", "path", path)
+    request_handle:streamInfo():dynamicMetadata():set("field_filter", "correlation_id", corr)
 end
 
 function envoy_on_response(response_handle)
   local info = response_handle:streamInfo()
   local stash = info:dynamicMetadata():get("field_filter")
+  local corr = stash and stash["correlation_id"]
+  if corr and corr ~= "" then
+    response_handle:headers():replace("x-correlation-id", corr)
+  end
   local path = stash and stash["path"]
   response_handle:logInfo("field_filter: path=" .. tostring(path))
   if not path or not path:find("^/aggregate/hazards") then return end
