@@ -83,6 +83,9 @@ spec:
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-events --partitions 1 --replication-factor 1
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-ingest --partitions 12 --replication-factor 1
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --alter --topic hazard-ingest --partitions 12 >/dev/null 2>&1 || true
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic field-reports-ingest --partitions 12 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-dlq --partitions 3 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-retry --partitions 3 --replication-factor 1
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -128,6 +131,8 @@ spec:
           ports:
             - containerPort: 50051
               name: grpc
+            - containerPort: 50052
+              name: http
           envFrom:
             - configMapRef:
                 name: aggregate-env
