@@ -7,7 +7,6 @@ resources:
   - k8s/storage.yaml
   - k8s/databases.yaml
   - k8s/observability.yaml
-  - k8s/grafana-dashboards.yaml
   - k8s/external-mock.yaml
   - k8s/core.yaml
   - k8s/networking.yaml
@@ -66,3 +65,9 @@ configMapGenerator:
       - API Gateway/envoy.yaml
       - API Gateway/lua/field_filter.lua
       - API Gateway/descriptors/api.pb
+  - name: grafana-dashboards-provider
+    files:
+      - infra/grafana/dashboards.yaml
+  - name: grafana-dashboards-json
+    files:
+      - infra/grafana/bnpb-overview.json
