@@ -32,6 +32,13 @@ spec:
     enabled: true
     configsvrReplSet:
       size: 3
+      labels:
+        role: store
+      resources:
+        requests:
+          memory: "512Mi"
+        limits:
+          memory: "1Gi"
       configuration: |
         storage:
           wiredTiger:
@@ -45,7 +52,13 @@ spec:
         timeoutSeconds: 15
         failureThreshold: 10
       affinity:
-        antiAffinityTopologyKey: "none"
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: configsvr
       expose:
         enabled: false
         type: ClusterIP
@@ -56,6 +69,13 @@ spec:
               storage: 1Gi
     mongos:
       size: 4
+      labels:
+        role: store
+      resources:
+        requests:
+          memory: "512Mi"
+        limits:
+          memory: "1Gi"
       livenessProbe:
         timeoutSeconds: 15
         failureThreshold: 10
@@ -64,12 +84,25 @@ spec:
         timeoutSeconds: 15
         failureThreshold: 10
       affinity:
-        antiAffinityTopologyKey: "none"
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: mongos
       expose:
         type: ClusterIP
   replsets:
     - name: shard1
       size: 3
+      labels:
+        role: store
+      resources:
+        requests:
+          memory: "512Mi"
+        limits:
+          memory: "1Gi"
       configuration: |
         storage:
           wiredTiger:
@@ -83,7 +116,13 @@ spec:
         timeoutSeconds: 15
         failureThreshold: 10
       affinity:
-        antiAffinityTopologyKey: "none"
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/replset: shard1
       expose:
         enabled: false
         type: ClusterIP
@@ -94,6 +133,13 @@ spec:
               storage: 1Gi
     - name: shard2
       size: 3
+      labels:
+        role: store
+      resources:
+        requests:
+          memory: "512Mi"
+        limits:
+          memory: "1Gi"
       configuration: |
         storage:
           wiredTiger:
@@ -107,7 +153,13 @@ spec:
         timeoutSeconds: 15
         failureThreshold: 10
       affinity:
-        antiAffinityTopologyKey: "none"
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/replset: shard2
       expose:
         enabled: false
         type: ClusterIP
@@ -129,12 +181,18 @@ spec:
     metadata:
       labels:
         app: mongo-cluster-init
+        role: other
     spec:
       restartPolicy: OnFailure
       containers:
         - name: mongo-cluster-init
           image: percona/percona-server-mongodb:8.0.4-1-multi
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           envFrom:
             - configMapRef:
                 name: aggregate-env
@@ -210,11 +268,17 @@ spec:
     metadata:
       labels:
         app: auth-db
+        role: store
     spec:
       containers:
         - name: auth-db
           image: postgres:16-alpine
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "512Mi"
+            limits:
+              memory: "1Gi"
           ports:
             - containerPort: 5432
               name: postgres

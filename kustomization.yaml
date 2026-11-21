@@ -1,13 +1,16 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+namespace: sistem-informasi-kebencanaan-bnpb
 
 resources:
+  - k8s/namespace.yaml
   - k8s/storage.yaml
   - k8s/databases.yaml
   - k8s/observability.yaml
   - k8s/external-mock.yaml
   - k8s/core.yaml
   - k8s/networking.yaml
+  - k8s/network-policies.yaml
 
 secretGenerator:
   - name: auth-env
@@ -42,6 +45,7 @@ configMapGenerator:
       - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
       - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
       - KAFKA_NUM_PARTITIONS=1
+      - KAFKA_HEAP_OPTS=-Xmx512m -Xms256m
   - name: aggregate-env
     envs:
       - Aggregate Service/.env

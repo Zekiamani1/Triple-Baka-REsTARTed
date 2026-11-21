@@ -15,12 +15,18 @@ spec:
     metadata:
       labels:
         app: kafka-aggregate
+        role: broker
     spec:
       enableServiceLinks: false
       containers:
         - name: kafka-aggregate
           image: apache/kafka:latest
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "512Mi"
+            limits:
+              memory: "1Gi"
           ports:
             - containerPort: 29092
               name: internal
@@ -65,6 +71,7 @@ spec:
     metadata:
       labels:
         app: kafka-init
+        role: other
     spec:
       enableServiceLinks: false
       restartPolicy: OnFailure
@@ -72,6 +79,11 @@ spec:
         - name: kafka-init
           image: apache/kafka:latest
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           command:
             - /bin/sh
             - -c
@@ -102,12 +114,18 @@ spec:
     metadata:
       labels:
         app: aggregate
+        role: aggregator
     spec:
       terminationGracePeriodSeconds: 40
       initContainers:
         - name: wait-for-mongo
           image: percona/percona-server-mongodb:8.0.4-1-multi
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           envFrom:
             - configMapRef:
                 name: aggregate-env
@@ -128,6 +146,11 @@ spec:
         - name: aggregate
           image: triple-baka-restarted-aggregate:latest
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "256Mi"
+            limits:
+              memory: "512Mi"
           ports:
             - containerPort: 50051
               name: grpc
@@ -139,6 +162,8 @@ spec:
             - secretRef:
                 name: mongo-cluster-secrets
           env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=384"
             - name: MONGO_URI
               value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin&readPreference=secondaryPreferred
           readinessProbe:
@@ -171,11 +196,17 @@ spec:
     metadata:
       labels:
         app: bmkg-poller
+        role: aggregator
     spec:
       containers:
         - name: bmkg-poller
           image: triple-baka-restarted-bmkg-poller:latest
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "256Mi"
+            limits:
+              memory: "512Mi"
           ports:
             - containerPort: 8085
               name: health
@@ -214,11 +245,17 @@ spec:
     metadata:
       labels:
         app: pvmbg-poller
+        role: aggregator
     spec:
       containers:
         - name: pvmbg-poller
           image: triple-baka-restarted-pvmbg-poller:latest
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "256Mi"
+            limits:
+              memory: "512Mi"
           ports:
             - containerPort: 8086
               name: health
@@ -257,11 +294,20 @@ spec:
     metadata:
       labels:
         app: event-consumer
+        role: consumer
     spec:
       containers:
         - name: event-consumer
           image: triple-baka-restarted-event-consumer:latest
           imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=192"
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           ports:
             - containerPort: 8087
               name: health
@@ -300,11 +346,20 @@ spec:
     metadata:
       labels:
         app: alert-consumer
+        role: consumer
     spec:
       containers:
         - name: alert-consumer
           image: triple-baka-restarted-alert-consumer:latest
           imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=192"
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           ports:
             - containerPort: 8088
               name: health
@@ -345,11 +400,17 @@ spec:
     metadata:
       labels:
         app: auth-service
+        role: api
     spec:
       initContainers:
         - name: auth-keygen
           image: auth-service:dev
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           command:
             - ./auth-service
             - keygen
@@ -362,6 +423,11 @@ spec:
         - name: auth-seed
           image: auth-service:dev
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           command:
             - sh
             - -c
@@ -373,6 +439,11 @@ spec:
         - name: auth-service
           image: auth-service:dev
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           ports:
             - containerPort: 8083
               name: grpc
@@ -417,11 +488,22 @@ spec:
     metadata:
       labels:
         app: gateway
+        role: api
     spec:
       containers:
         - name: gateway
           image: envoyproxy/envoy:v1.31-latest
           imagePullPolicy: IfNotPresent
+          args:
+            - "-c"
+            - "/etc/envoy/envoy.yaml"
+            - "--concurrency"
+            - "2"
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           ports:
             - containerPort: 8080
               name: http

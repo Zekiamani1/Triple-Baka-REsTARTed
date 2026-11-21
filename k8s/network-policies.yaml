@@ -1,0 +1,50 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mongo-storage-isolation
+  namespace: sistem-informasi-kebencanaan-bnpb
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: percona-server-mongodb
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - aggregate
+                  - mongo-cluster-init
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: percona-server-mongodb
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: psmdb-operator
+      ports:
+        - protocol: TCP
+          port: 27017
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: auth-db-isolation
+  namespace: sistem-informasi-kebencanaan-bnpb
+spec:
+  podSelector:
+    matchLabels:
+      app: auth-db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: auth-service
+      ports:
+        - protocol: TCP
+          port: 5432
