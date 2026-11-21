@@ -73,15 +73,27 @@ static_resources:
                           route:
                             cluster: aggregator_http
                             timeout: 30s
+                          typed_per_filter_config:
+                            envoy.filters.http.grpc_json_transcoder:
+                              "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                              disabled: true
                         - match: { prefix: "/dashboard/"}
                           route:
                             cluster: analytics_dashboard
                             prefix_rewrite: "/"
                             timeout: 15s
+                          typed_per_filter_config:
+                            envoy.filters.http.grpc_json_transcoder:
+                              "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                              disabled: true
                         - match: { prefix: "/internal/audit/"}
                           route:
                             cluster: aggregator_http
                             timeout: 30s
+                          typed_per_filter_config:
+                            envoy.filters.http.grpc_json_transcoder:
+                              "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                              disabled: true
                         - match: { prefix: "/internal/dlq/"}
                           route:
                             cluster: aggregator_http
@@ -90,6 +102,9 @@ static_resources:
                             envoy.filters.http.jwt_authn:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
                               requirement_name: auth_provider
+                            envoy.filters.http.grpc_json_transcoder:
+                              "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                              disabled: true
                         - match: { prefix: "/field-reports"}
                           route:
                             cluster: aggregator_http
@@ -98,6 +113,9 @@ static_resources:
                             envoy.filters.http.jwt_authn:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
                               requirement_name: auth_provider
+                            envoy.filters.http.grpc_json_transcoder:
+                              "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                              disabled: true
                 http_filters:
                   - name: envoy.filters.http.cors
                     typed_config:
