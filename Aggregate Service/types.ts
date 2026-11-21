@@ -1,10 +1,15 @@
 export type Source =
   | "BMKG"
-  | "PVMBG";
+  | "PVMBG"
+  | "SATELIT"
+  | "SENSOR_PANTAI"
+  | "TIM_LAPANGAN";
 
 export type HazardType =
   | "SEISMIC"
-  | "VOLCANIC";
+  | "VOLCANIC"
+  | "WILDFIRE"
+  | "COASTAL";
 
 export type HazardSeverity =
   | "NORMAL"

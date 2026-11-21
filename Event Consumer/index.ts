@@ -14,7 +14,7 @@ const shutdownTelemetry = initTelemetry();
 import { Kafka } from "kafkajs";
 import { createServer } from "node:http";
 import { kafkaConfig } from "./config";
-import { parseHazardMessage } from "./message";
+import { parseHazardMessage, PoisonPillError } from "./message";
 
 const kafka = new Kafka({
   clientId: kafkaConfig.clientId,
@@ -94,6 +94,9 @@ async function main(): Promise<void> {
               code: SpanStatusCode.ERROR,
               message: error instanceof Error ? error.message : String(error),
             });
+            if (error instanceof PoisonPillError) {
+              return; // Commit offset and continue without crash-looping
+            }
             throw error;
           } finally {
             span.end();

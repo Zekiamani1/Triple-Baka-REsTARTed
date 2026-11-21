@@ -14,6 +14,9 @@ export const kafka = {
   groupId: required('KAFKA_CONSUMER_GROUP', 'aggregate-ingestion'),
   inTopic: required('KAFKA_TOPIC_HAZARD_INGEST', 'hazard-ingest'),
   outTopic: required('KAFKA_TOPIC_HAZARD_EVENTS', 'hazard-events'),
+  fieldReportsTopic: required('KAFKA_TOPIC_FIELD_REPORTS', 'field-reports-ingest'),
+  dlqTopic: required('KAFKA_TOPIC_HAZARD_DLQ', 'hazard-dlq'),
+  retryTopic: required('KAFKA_TOPIC_HAZARD_RETRY', 'hazard-retry'),
 };
  
 export const mongo = {

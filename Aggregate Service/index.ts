@@ -23,10 +23,19 @@ import {
   connectKafka,
   disconnectKafka,
   isKafkaReady,
+  publishFieldReport,
   publishHazard,
   runIngestConsumer,
   stopIngestConsumer,
 } from "./kafkabridge";
+import {
+  ensureUnprocessedIndexes,
+  parkUnprocessedMessage,
+  startInternalHttpServer,
+  type UnprocessedMessageDoc,
+} from "./dlqAndFieldReports";
+import type { Collection } from "mongodb";
+import type { Server as HttpServer } from "node:http";
 
 const packageDefinition = protoLoader.loadSync(path.resolve("proto/hazard/hazard.proto"), {
   keepCase: true,
@@ -59,6 +68,8 @@ const mongoClient = new MongoClient(mongo.uri, {
 });
 
 let collection: any;
+let unprocessedCol: Collection<UnprocessedMessageDoc>;
+let internalHttpServer: HttpServer | null = null;
 const server = new grpc.Server();
 let ready = false;
 let stopping = false;
@@ -114,7 +125,7 @@ async function trackMongoOp<T = any>(operation: string, fn: () => Promise<T>): P
     }
 }
 
-async function ingestHazard(hazardEvent: any): Promise<void> {
+async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean }): Promise<void> {
     const start = performance.now();
     const source = String(hazardEvent?.source ?? "UNKNOWN");
     const hazardType = String(hazardEvent?.hazard_type ?? "UNKNOWN");
@@ -167,7 +178,7 @@ async function ingestHazard(hazardEvent: any): Promise<void> {
                     const existingEvent = await trackMongoOp("findOne", () =>
                         collection.findOne(identity),
                     );
-                    if (existingEvent?.published) {
+                    if (existingEvent?.published && !opts?.upsert) {
                         logInfo("duplicate hazard event ignored", {
                             source: hazardEvent.source,
                             source_ref_id: hazardEvent.source_ref_id,
@@ -182,7 +193,25 @@ async function ingestHazard(hazardEvent: any): Promise<void> {
                         throw error;
                     }
 
-                    eventToPublish = withoutDeliveryState(existingEvent);
+                    if (opts?.upsert) {
+                        const preservedId = existingEvent.hazard_id ?? hazardEvent.hazard_id;
+                        await trackMongoOp("updateOne", () =>
+                            collection.updateOne(identity, {
+                                $set: {
+                                    severity: hazardEvent.severity,
+                                    area_name: hazardEvent.area_name,
+                                    latitude: hazardEvent.latitude,
+                                    longitude: hazardEvent.longitude,
+                                    occurred_at: hazardEvent.occurred_at,
+                                    ingested_at: hazardEvent.ingested_at,
+                                    attributes: hazardEvent.attributes,
+                                },
+                            }),
+                        );
+                        eventToPublish = { ...hazardEvent, hazard_id: preservedId };
+                    } else {
+                        eventToPublish = withoutDeliveryState(existingEvent);
+                    }
                 }
 
                 await publishHazard(eventToPublish);
@@ -487,9 +516,63 @@ async function main () {
     collection = db.collection(mongo.collection);
     await collection.createIndex({ partition_key: 1, source: 1, source_ref_id: 1 }, { unique: true });
     await collection.createIndex({ hazard_id: 1 });
+    unprocessedCol = await ensureUnprocessedIndexes(db);
 
     await connectKafka();
-    void runIngestConsumer(ingestHazard).catch((error) => {
+    internalHttpServer = startInternalHttpServer({
+        unprocessedCol,
+        ingestHazard,
+        publishFieldReport,
+    });
+    void runIngestConsumer({
+        onHazard: (hazard) => ingestHazard(hazard),
+        onDlqMessage: async (dlq) => {
+            await parkUnprocessedMessage(unprocessedCol, {
+                message_id: typeof dlq.message_id === "string" ? dlq.message_id : undefined,
+                source: String(dlq.source ?? "UNKNOWN"),
+                source_ref_id: String(dlq.source_ref_id ?? ""),
+                raw_payload: String(dlq.raw_payload ?? JSON.stringify(dlq)),
+                raw_encoding: dlq.raw_encoding === "base64" ? "base64" : "utf8",
+                received_at: typeof dlq.received_at === "string" ? dlq.received_at : undefined,
+                reason: String(dlq.reason ?? "dlq_parked"),
+                retryable: Boolean(dlq.retryable),
+                attempts: Number(dlq.attempts ?? 1) || 1,
+                status: dlq.retryable ? "retrying" : "parked",
+                seq: Number(dlq.seq ?? 0) || 0,
+            });
+        },
+        onPoisonPill: async (info) => {
+            await parkUnprocessedMessage(unprocessedCol, {
+                source: info.source,
+                raw_payload: info.rawPayload,
+                raw_encoding: info.rawEncoding,
+                reason: info.reason,
+                retryable: false,
+                status: "parked",
+            });
+        },
+        onRetryableFailure: async (info) => {
+            const doc = await parkUnprocessedMessage(unprocessedCol, {
+                message_id: info.messageId,
+                source: info.source,
+                source_ref_id: info.sourceRefId,
+                raw_payload: info.rawPayload,
+                raw_encoding: "utf8",
+                reason: info.reason,
+                retryable: !info.exhausted,
+                attempts: info.attempts,
+                status: info.exhausted ? "parked" : "retrying",
+            });
+            return doc.message_id;
+        },
+        onRetryRecovered: async (messageId) => {
+            const now = new Date();
+            await unprocessedCol.updateOne(
+                { message_id: messageId },
+                { $set: { status: "recovered", recovered_at: now, updated_at: now } },
+            );
+        },
+    }).catch((error) => {
         logError("Kafka ingestion consumer failed", {
             err: error instanceof Error ? error.message : String(error),
         });
@@ -579,6 +662,10 @@ async function shutdown(exitCode = 0) {
       stopIngestConsumer(),
       new Promise<void>((resolve, reject) => {
         server.tryShutdown(error => error ? reject(error) : resolve());
+      }),
+      new Promise<void>((resolve) => {
+        if (!internalHttpServer) return resolve();
+        internalHttpServer.close(() => resolve());
       }),
     ]);
     // Producer and storage stay available until in-flight work has finished.
