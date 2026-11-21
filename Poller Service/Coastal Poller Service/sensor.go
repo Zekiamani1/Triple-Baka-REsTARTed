@@ -276,8 +276,9 @@ func NewSensorClient(cfg Config) (*SensorClient, error) {
 	}, nil
 }
 
-// FetchStations retrieves the station metadata. It uses the authenticated
-// /v1/stations endpoint and participates in the sensor circuit breaker.
+// FetchStations retrieves station metadata through the authenticated endpoint.
+// It participates in the breaker, but observation freshness is evaluated only
+// after FetchObservations returns and the caller inspects item timestamps.
 func (c *SensorClient) FetchStations(ctx context.Context) ([]Station, error) {
 	if c == nil {
 		return nil, fmt.Errorf("sensor client is nil")
@@ -298,13 +299,14 @@ func (c *SensorClient) FetchStations(ctx context.Context) ([]Station, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	return stations, nil
 }
 
 // FetchObservations retrieves one cursor-based page. The cursor is opaque and
 // is passed back to the sensor unchanged; an empty cursor is omitted so the
-// source applies its initial-page behavior.
+// source applies its initial-page behavior. It checks breaker permission and
+// records transport/envelope failures, but leaves success/freshness completion
+// to RecordObservationPageFreshness after item timestamps have been inspected.
 //
 // Individual items are decoded independently. A malformed item is returned in
 // ObservationRecord with its original Raw bytes and DecodeErr, while valid
@@ -313,49 +315,63 @@ func (c *SensorClient) FetchObservations(ctx context.Context, cursor string) (Ob
 	if c == nil {
 		return ObservationPage{}, fmt.Errorf("sensor client is nil")
 	}
+	if err := c.breaker.allow(); err != nil {
+		return ObservationPage{}, err
+	}
 
 	query := url.Values{}
 	if cursor != "" {
 		query.Set("cursor", cursor)
 	}
 
-	var page ObservationPage
-	err := c.breaker.Do(func() error {
-		var envelope observationsEnvelope
-		if err := c.getJSON(ctx, observationsPath, query, true, &envelope); err != nil {
-			return err
+	var envelope observationsEnvelope
+	if err := c.getJSON(ctx, observationsPath, query, true, &envelope); err != nil {
+		if ctx.Err() == nil {
+			c.breaker.recordFailure()
 		}
-		if envelope.Items == nil {
-			return fmt.Errorf("invalid observations response: missing or null items")
-		}
-
-		page.GeneratedAt = envelope.GeneratedAt
-		if envelope.NextCursor != nil {
-			page.NextCursor = *envelope.NextCursor
-		}
-		page.Items = make([]ObservationRecord, 0, len(*envelope.Items))
-
-		for i, raw := range *envelope.Items {
-			record := ObservationRecord{
-				Raw: append(json.RawMessage(nil), raw...),
-			}
-
-			var observation Observation
-			if err := json.Unmarshal(raw, &observation); err != nil {
-				record.DecodeErr = fmt.Errorf("decode observation item %d: %w", i, err)
-			} else {
-				record.Observation = &observation
-			}
-			page.Items = append(page.Items, record)
-		}
-
-		return nil
-	})
-	if err != nil {
+		return ObservationPage{}, err
+	}
+	if envelope.Items == nil {
+		err := fmt.Errorf("invalid observations response: missing or null items")
+		c.breaker.recordFailure()
 		return ObservationPage{}, err
 	}
 
+	page := ObservationPage{GeneratedAt: envelope.GeneratedAt}
+	if envelope.NextCursor != nil {
+		page.NextCursor = *envelope.NextCursor
+	}
+	page.Items = make([]ObservationRecord, 0, len(*envelope.Items))
+	for i, raw := range *envelope.Items {
+		record := ObservationRecord{Raw: append(json.RawMessage(nil), raw...)}
+		var observation Observation
+		if err := json.Unmarshal(raw, &observation); err != nil {
+			record.DecodeErr = fmt.Errorf("decode observation item %d: %w", i, err)
+		} else {
+			record.Observation = &observation
+		}
+		page.Items = append(page.Items, record)
+	}
+
+	// Do not close the breaker here. A syntactically valid envelope may contain
+	// only stale observations. The caller reports whether this page contains
+	// fresh sensor data after applying the configured freshness policy.
 	return page, nil
+}
+
+// RecordObservationPageFreshness completes the breaker decision after the
+// caller has inspected event-time freshness. A stale-only or malformed page
+// counts as an upstream data-quality failure; an empty page is considered a
+// successful poll by the caller because no stale item was returned.
+func (c *SensorClient) RecordObservationPageFreshness(hasFreshData bool) {
+	if c == nil || c.breaker == nil {
+		return
+	}
+	if hasFreshData {
+		c.breaker.recordSuccess()
+	} else {
+		c.breaker.recordFailure()
+	}
 }
 
 // HealthCheck calls /healthz without authentication. This only verifies that

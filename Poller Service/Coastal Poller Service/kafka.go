@@ -8,10 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 const (
@@ -124,7 +127,7 @@ func (p *KafkaPublisher) PublishHazard(
 		Key:     []byte(event.HazardID),
 		Value:   payload,
 		Time:    event.IngestedAt.UTC(),
-		Headers: kafkaHeaders(correlationID, event.HazardID),
+		Headers: kafkaHeaders(ctx, correlationID, event.HazardID),
 	}
 	if message.Time.IsZero() {
 		message.Time = time.Now().UTC()
@@ -197,10 +200,61 @@ func (p *KafkaPublisher) PublishQuarantine(
 		Key:     []byte(messageID),
 		Value:   payload,
 		Time:    receivedAt.UTC(),
-		Headers: kafkaHeaders(correlationID, messageID),
+		Headers: kafkaHeaders(ctx, correlationID, messageID),
 	}
 	if err := p.quarantineWriter.WriteMessages(ctx, message); err != nil {
 		return fmt.Errorf("publish quarantine message to topic %q: %w", p.quarantineTopic, err)
+	}
+	return nil
+}
+
+// PublishRetryStatus writes a status update for a previously retryable
+// quarantine record. The stable Kafka key is the original message ID, so
+// downstream quarantine projections can update the same logical record.
+func (p *KafkaPublisher) PublishRetryStatus(
+	ctx context.Context,
+	retry RetryableObservation,
+	status string,
+	reason string,
+) error {
+	if err := p.ensureReady(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(retry.MessageID) == "" || len(retry.Raw) == 0 {
+		return fmt.Errorf("retry status requires message ID and original payload")
+	}
+	if status != "recovered" && status != "parked" && status != "retrying" {
+		return fmt.Errorf("unsupported retry status %q", status)
+	}
+
+	if reason == "" {
+		reason = retry.Reason
+	}
+	updatedAt := time.Now().UTC()
+	quarantine := QuarantineMessage{
+		MessageID:     retry.MessageID,
+		Source:        coastalKafkaSource,
+		ReceivedAt:    retry.ReceivedAt.UTC(),
+		Reason:        reason,
+		Retryable:     status == "retrying",
+		Status:        status,
+		Attempts:      retry.Attempts + 1,
+		ObservationID: retry.ObservationID,
+		CorrelationID: retry.CorrelationID,
+		PayloadBase64: append([]byte(nil), retry.Raw...),
+	}
+	payload, err := json.Marshal(quarantine)
+	if err != nil {
+		return fmt.Errorf("marshal quarantine status update: %w", err)
+	}
+	message := kafka.Message{
+		Key:     []byte(retry.MessageID),
+		Value:   payload,
+		Time:    updatedAt,
+		Headers: kafkaHeaders(ctx, retry.CorrelationID, retry.MessageID),
+	}
+	if err := p.quarantineWriter.WriteMessages(ctx, message); err != nil {
+		return fmt.Errorf("publish quarantine status %q to topic %q: %w", status, p.quarantineTopic, err)
 	}
 	return nil
 }
@@ -247,17 +301,48 @@ func (p *KafkaPublisher) ensureReady() error {
 	return nil
 }
 
-func kafkaHeaders(correlationID, messageID string) []kafka.Header {
-	headers := []kafka.Header{
-		{Key: "content-type", Value: []byte(kafkaContentType)},
-	}
+func kafkaHeaders(ctx context.Context, correlationID, messageID string) []kafka.Header {
+	headers := []kafka.Header{{Key: "content-type", Value: []byte(kafkaContentType)}}
 	if strings.TrimSpace(correlationID) != "" {
 		headers = append(headers, kafka.Header{Key: "correlation-id", Value: []byte(correlationID)})
 	}
 	if strings.TrimSpace(messageID) != "" {
 		headers = append(headers, kafka.Header{Key: "message-id", Value: []byte(messageID)})
 	}
+
+	// Inject W3C Trace Context (traceparent/tracestate) and baggage from the
+	// producer span. A downstream consumer can extract these headers to create
+	// a child span rather than starting an unrelated trace.
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	keys := make([]string, 0, len(carrier))
+	for key := range carrier {
+		keys = append(keys, strings.ToLower(key))
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := carrier.Get(key)
+		if value == "" {
+			continue
+		}
+		headers = append(headers, kafka.Header{Key: key, Value: []byte(value)})
+	}
 	return headers
+}
+
+// ExtractKafkaTraceContext extracts W3C trace context from Kafka headers. Use
+// this in Kafka consumers before starting their processing span. In the
+// TypeScript Aggregate service, perform the equivalent extraction with the
+// OpenTelemetry propagator and the record's headers.
+func ExtractKafkaTraceContext(ctx context.Context, headers []kafka.Header) context.Context {
+	carrier := propagation.MapCarrier{}
+	for _, header := range headers {
+		key := strings.ToLower(strings.TrimSpace(header.Key))
+		if key == "traceparent" || key == "tracestate" || key == "baggage" {
+			carrier.Set(key, string(header.Value))
+		}
+	}
+	return otel.GetTextMapPropagator().Extract(ctx, carrier)
 }
 
 func deterministicQuarantineID(source, reason string, payload []byte) string {

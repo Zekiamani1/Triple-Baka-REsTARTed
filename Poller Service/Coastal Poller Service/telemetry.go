@@ -36,6 +36,10 @@ type Telemetry struct {
 	quarantined      metric.Int64Counter
 	hazardsPublished metric.Int64Counter
 	checkpointWrites metric.Int64Counter
+	retryQueued      metric.Int64Counter
+	retryAttempts    metric.Int64Counter
+	retryRecovered   metric.Int64Counter
+	stalePages       metric.Int64Counter
 	dataAge          metric.Float64Histogram
 
 	circuitState metric.Int64ObservableGauge
@@ -140,6 +144,30 @@ func NewTelemetry(ctx context.Context, cfg Config) (*Telemetry, error) {
 	if telemetry.checkpointWrites, err = meter.Int64Counter(
 		"pantai_checkpoint_writes_total",
 		metric.WithDescription("Number of successful durable cursor checkpoint writes."),
+	); err != nil {
+		return telemetry.initError(err)
+	}
+	if telemetry.retryQueued, err = meter.Int64Counter(
+		"pantai_retryable_observations_queued_total",
+		metric.WithDescription("Unknown-station observations durably queued for automatic retry."),
+	); err != nil {
+		return telemetry.initError(err)
+	}
+	if telemetry.retryAttempts, err = meter.Int64Counter(
+		"pantai_retryable_observation_attempts_total",
+		metric.WithDescription("Automatic retry attempts for unknown-station observations."),
+	); err != nil {
+		return telemetry.initError(err)
+	}
+	if telemetry.retryRecovered, err = meter.Int64Counter(
+		"pantai_retryable_observations_recovered_total",
+		metric.WithDescription("Unknown-station observations recovered and published."),
+	); err != nil {
+		return telemetry.initError(err)
+	}
+	if telemetry.stalePages, err = meter.Int64Counter(
+		"pantai_stale_observation_pages_total",
+		metric.WithDescription("Observation pages with no fresh observation according to the configured policy."),
 	); err != nil {
 		return telemetry.initError(err)
 	}
@@ -325,6 +353,30 @@ func (t *Telemetry) RecordDataAge(ctx context.Context, observedAt time.Time) {
 	}
 	t.dataAge.Record(ctx, age.Seconds())
 	t.lastDataUnixNS.Store(observedAt.UTC().UnixNano())
+}
+
+func (t *Telemetry) RecordRetryQueued(ctx context.Context) {
+	if t != nil {
+		t.retryQueued.Add(ctx, 1)
+	}
+}
+
+func (t *Telemetry) RecordRetryAttempt(ctx context.Context) {
+	if t != nil {
+		t.retryAttempts.Add(ctx, 1)
+	}
+}
+
+func (t *Telemetry) RecordRetryRecovered(ctx context.Context) {
+	if t != nil {
+		t.retryRecovered.Add(ctx, 1)
+	}
+}
+
+func (t *Telemetry) RecordStalePage(ctx context.Context) {
+	if t != nil {
+		t.stalePages.Add(ctx, 1)
+	}
 }
 
 func (t *Telemetry) RecordCheckpoint(ctx context.Context) {

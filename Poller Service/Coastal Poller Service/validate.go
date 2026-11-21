@@ -136,14 +136,9 @@ func ValidateObservation(
 		return CoastalReading{}, ReasonNonFiniteWaveHeight
 	}
 
-	station, ok := stations[stationID]
-	if !ok {
-		return CoastalReading{}, ReasonUnknownStation
-	}
-	if reason := validateStationMetadata(stationID, station); reason != "" {
-		return CoastalReading{}, reason
-	}
-
+	// Check event-time freshness before station lookup. Otherwise an old
+	// observation from an unknown station could be retried forever even though
+	// its timestamp has already expired.
 	observedAt := observation.ObservedAt.UTC()
 	referenceTime := now.UTC()
 	age := referenceTime.Sub(observedAt)
@@ -152,6 +147,14 @@ func ValidateObservation(
 	}
 	if age > policy.MaxObservationAge {
 		return CoastalReading{}, ReasonStaleObservation
+	}
+
+	station, ok := stations[stationID]
+	if !ok {
+		return CoastalReading{}, ReasonUnknownStation
+	}
+	if reason := validateStationMetadata(stationID, station); reason != "" {
+		return CoastalReading{}, reason
 	}
 
 	return CoastalReading{
