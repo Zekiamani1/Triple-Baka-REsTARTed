@@ -25,28 +25,23 @@ import type { IHeaders } from "kafkajs";
 export const SCOPE_NAME = process.env.OTEL_SERVICE_NAME ?? "alert-consumer";
 
 export function initTelemetry(): () => Promise<void> {
-  if (process.env.OTEL_SDK_DISABLED === "true") {
-    return async () => {};
-  }
+  if (process.env.OTEL_SDK_DISABLED === "true") return async () => {};
 
   const sdk = new NodeSDK({
     resource: resourceFromAttributes({
       [ATTR_SERVICE_NAME]: SCOPE_NAME,
-      [ATTR_SERVICE_VERSION]: "1.0.0",
+      [ATTR_SERVICE_VERSION]: "1.1.0",
     }),
     traceExporter: new OTLPTraceExporter(),
     metricReader: new PeriodicExportingMetricReader({
       exporter: new OTLPMetricExporter(),
       exportIntervalMillis: Number(process.env.OTEL_METRIC_EXPORT_INTERVAL ?? "10000"),
     }),
-    logRecordProcessors: [
-      new BatchLogRecordProcessor({ exporter: new OTLPLogExporter() }),
-    ],
+    logRecordProcessors: [new BatchLogRecordProcessor({ exporter: new OTLPLogExporter() })],
     instrumentations: [new HttpInstrumentation()],
   });
 
   sdk.start();
-
   return async () => {
     await sdk.shutdown().catch((err) => {
       logError("failed to shutdown OpenTelemetry SDK", { err: String(err) });
@@ -74,20 +69,12 @@ function writeLog(level: "INFO" | "WARN" | "ERROR", msg: string, attrs: Record<s
     time: new Date().toISOString(),
     level,
     msg,
-    ...(spanCtx
-      ? {
-          trace_id: spanCtx.traceId,
-          span_id: spanCtx.spanId,
-        }
-      : {}),
+    ...(spanCtx ? { trace_id: spanCtx.traceId, span_id: spanCtx.spanId } : {}),
     ...attrs,
   };
-  const line = JSON.stringify(record) + "\n";
-  if (level === "ERROR") {
-    process.stderr.write(line);
-  } else {
-    process.stdout.write(line);
-  }
+  const line = `${JSON.stringify(record)}\n`;
+  if (level === "ERROR") process.stderr.write(line);
+  else process.stdout.write(line);
 }
 
 export function logInfo(msg: string, attrs?: Record<string, unknown>): void {
@@ -108,10 +95,9 @@ export function recordAlertTriggered(
   severity: string,
   areaName: string,
 ): void {
-  metrics
-    .getMeter(SCOPE_NAME)
+  metrics.getMeter(SCOPE_NAME)
     .createCounter("alert_consumer.alerts.triggered_total", {
-      description: "Total number of emergency alerts triggered (SIAGA/AWAS)",
+      description: "Total number of emergency alerts triggered (SIAGA/AWAS or critical coastal)",
     })
     .add(1, { source, hazard_type: hazardType, severity, area_name: areaName });
 }
@@ -125,8 +111,8 @@ export function recordMessageConsumed(
   status: string,
   durationMs: number,
 ): void {
-  const m = metrics.getMeter(SCOPE_NAME);
-  m.createCounter("alert_consumer.messages.consumed_total", {
+  const meter = metrics.getMeter(SCOPE_NAME);
+  meter.createCounter("alert_consumer.messages.consumed_total", {
     description: "Total number of hazard events consumed by Alert Consumer",
   }).add(1, {
     topic,
@@ -136,27 +122,43 @@ export function recordMessageConsumed(
     is_emergency: String(isEmergency),
     status,
   });
-  m.createHistogram("alert_consumer.messages.processing_duration_ms", {
+  meter.createHistogram("alert_consumer.messages.processing_duration_ms", {
     description: "Duration of processing a Kafka hazard event in milliseconds",
     unit: "ms",
   }).record(durationMs, { topic, status });
 }
 
+export function recordNotificationDelivery(status: "success" | "error", durationMs: number): void {
+  const meter = metrics.getMeter(SCOPE_NAME);
+  meter.createCounter("alert_consumer.notification_delivery_total", {
+    description: "Field Receiver delivery attempts completed by outcome",
+  }).add(1, { status });
+  meter.createHistogram("alert_consumer.notification_delivery_duration_ms", {
+    description: "Duration of Field Receiver notification delivery, including retries",
+    unit: "ms",
+  }).record(durationMs, { status });
+}
+
 export function extractContextFromKafkaHeaders(headers?: IHeaders): Context {
   const carrier: Record<string, string> = {};
   if (headers) {
-    for (const [k, v] of Object.entries(headers)) {
-      if (Buffer.isBuffer(v)) {
-        carrier[k] = v.toString("utf8");
-      } else if (typeof v === "string") {
-        carrier[k] = v;
-      } else if (Array.isArray(v) && v.length > 0) {
-        const first = v[0];
-        carrier[k] = Buffer.isBuffer(first) ? first.toString("utf8") : String(first);
+    for (const [key, value] of Object.entries(headers)) {
+      if (Buffer.isBuffer(value)) carrier[key] = value.toString("utf8");
+      else if (typeof value === "string") carrier[key] = value;
+      else if (Array.isArray(value) && value.length > 0) {
+        const first = value[0];
+        carrier[key] = Buffer.isBuffer(first) ? first.toString("utf8") : String(first);
       }
     }
   }
   return propagation.extract(context.active(), carrier);
+}
+
+/** Inject W3C traceparent/tracestate/baggage into outbound HTTP headers. */
+export function injectContextToCarrier(): Record<string, string> {
+  const carrier: Record<string, string> = {};
+  propagation.inject(context.active(), carrier);
+  return carrier;
 }
 
 export { SpanKind, SpanStatusCode, trace };
