@@ -1,6 +1,7 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { Collection, Db } from "mongodb";
+import type { Collection, Db, MongoClient } from "mongodb";
+import { handleAuditRoute } from "./auditServer";
 import {
   MAX_PAYLOAD_BYTES,
   PoisonPillError,
@@ -299,18 +300,10 @@ export async function parkUnprocessedMessage(
   return doc;
 }
 
-function checkAuditToken(req: IncomingMessage): boolean {
-  const expected = process.env.AUDIT_API_TOKEN;
-  if (!expected) return true;
-  const auth = req.headers.authorization ?? "";
-  if (!auth.startsWith("Bearer ")) return false;
-  const provided = auth.slice("Bearer ".length);
-  const a = Buffer.from(provided, "utf8");
-  const b = Buffer.from(expected, "utf8");
-  return a.length === b.length && timingSafeEqual(a, b);
-}
-
 export function startInternalHttpServer(deps: {
+  mongoClient: MongoClient;
+  dbName: string;
+  collectionName: string;
   unprocessedCol: Collection<UnprocessedMessageDoc>;
   ingestHazard: (event: Record<string, unknown>, opts?: { upsert?: boolean }) => Promise<void>;
   publishFieldReport: (event: Record<string, unknown>) => Promise<void>;
@@ -322,6 +315,16 @@ export function startInternalHttpServer(deps: {
     const method = req.method ?? "GET";
 
     try {
+      if (
+        await handleAuditRoute(req, res, url, {
+          mongoClient: deps.mongoClient,
+          dbName: deps.dbName,
+          collectionName: deps.collectionName,
+          unprocessedCol: deps.unprocessedCol,
+        })
+      ) {
+        return;
+      }
       if (method === "GET" && url.pathname === "/health") {
         res.writeHead(200);
         res.end("UP");
@@ -446,37 +449,6 @@ export function startInternalHttpServer(deps: {
         }
 
         sendJson(res, 200, { replayed, failed, results });
-        return;
-      }
-
-      if (method === "GET" && url.pathname === "/internal/audit/unprocessed") {
-        if (!checkAuditToken(req)) {
-          sendError(res, 401, "unauthorized", "token tidak valid");
-          return;
-        }
-        const sourceParam = url.searchParams.get("source");
-        const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? "100") || 100, 1), 1000);
-        const query: Record<string, unknown> = { status: { $in: ["retrying", "parked"] } };
-        if (sourceParam) query.source = sourceParam;
-
-        const items = await deps.unprocessedCol
-          .find(query, {
-            projection: {
-              _id: 0,
-              message_id: 1,
-              source: 1,
-              received_at: 1,
-              reason: 1,
-              retryable: 1,
-              attempts: 1,
-              status: 1,
-            },
-          })
-          .sort({ received_at: 1, message_id: 1 })
-          .limit(limit)
-          .toArray();
-
-        sendJson(res, 200, { items, next_cursor: null });
         return;
       }
 

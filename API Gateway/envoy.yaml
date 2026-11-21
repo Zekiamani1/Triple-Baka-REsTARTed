@@ -69,6 +69,10 @@ static_resources:
                             envoy.filters.http.jwt_authn:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
                               requirement_name: auth_provider
+                        - match: { prefix: "/internal/audit/"}
+                          route:
+                            cluster: aggregator_http
+                            timeout: 30s
                         - match: { prefix: "/internal/dlq/"}
                           route:
                             cluster: aggregator_http

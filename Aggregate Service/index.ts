@@ -520,6 +520,9 @@ async function main () {
 
     await connectKafka();
     internalHttpServer = startInternalHttpServer({
+        mongoClient,
+        dbName: mongo.dbName,
+        collectionName: mongo.collection,
         unprocessedCol,
         ingestHazard,
         publishFieldReport,

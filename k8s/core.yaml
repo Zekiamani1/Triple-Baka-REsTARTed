@@ -116,6 +116,7 @@ spec:
         app: aggregate
         role: aggregator
     spec:
+      serviceAccountName: aggregate-reader
       terminationGracePeriodSeconds: 40
       initContainers:
         - name: wait-for-mongo
