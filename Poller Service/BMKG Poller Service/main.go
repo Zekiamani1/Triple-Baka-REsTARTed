@@ -67,9 +67,15 @@ func bmkgRequest(ctx context.Context, targetURL string) (*http.Response, error) 
 		return nil, err
 	}
 	req.Header.Set("X-BMKG-Key", requiredEnv("BMKG_API_KEY"))
+	req.Header.Set("X-Poller-Instance", pollerInstanceID())
+	if tok := ctx.Value(fencingTokenKey{}); tok != nil {
+		req.Header.Set("X-Fencing-Token", fmt.Sprintf("%v", tok))
+	}
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 	return httpClient().Do(req)
 }
+
+type fencingTokenKey struct{}
 
 func httpClient() *http.Client {
 	seconds, err := strconv.Atoi(envOrDefault("HTTP_TIMEOUT_SECONDS", "5"))
@@ -124,6 +130,12 @@ func SendToAggregate(ctx context.Context, thething *hazard.Hazard) error {
 
 	var headers kafkaHeaderCarrier
 	otel.GetTextMapPropagator().Inject(ctx, &headers)
+	if tok := ctx.Value(fencingTokenKey{}); tok != nil {
+		headers = append(headers,
+			kafka.Header{Key: "x-fencing-token", Value: []byte(fmt.Sprintf("%v", tok))},
+			kafka.Header{Key: "x-leader-id", Value: []byte(pollerInstanceID())},
+		)
+	}
 
 	err = writer.WriteMessages(ctx, kafka.Message{
 		Key:     []byte(thething.HazardId),
@@ -345,11 +357,12 @@ func main() {
 
 	startHealthServer()
 	interval := pollInterval()
-	now := time.Now()
+	instanceID := pollerInstanceID()
+	now := time.Now().Add(-10 * time.Minute)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	slog.InfoContext(ctx, "BMKG poller started", "interval_seconds", interval.Seconds())
+	slog.InfoContext(ctx, "BMKG poller started", "instance_id", instanceID, "interval_seconds", interval.Seconds())
 
 	for {
 		select {
@@ -357,8 +370,27 @@ func main() {
 			return
 		case <-ticker.C:
 			cycleStart := time.Now()
-			cycleCtx, cycleSpan := otel.Tracer(bmkgPollerScope).Start(ctx, "BMKGPoller.PollCycle",
-				trace.WithAttributes(attribute.String("poll.cursor", now.Format(time.RFC3339))),
+			lease, err := acquireLease(ctx, "BMKG", instanceID)
+			if err != nil {
+				slog.WarnContext(ctx, "BMKG lease acquire failed; skipping cycle", "err", err)
+				continue
+			}
+			if !lease.Acquired {
+				slog.DebugContext(ctx, "BMKG standby instance; leader is active", "leader_id", lease.LeaderID)
+				continue
+			}
+			if lease.Cursor != "" {
+				if parsed, err := time.Parse(time.RFC3339, lease.Cursor); err == nil {
+					now = parsed
+				}
+			}
+
+			cycleCtx := context.WithValue(ctx, fencingTokenKey{}, lease.FencingToken)
+			cycleCtx, cycleSpan := otel.Tracer(bmkgPollerScope).Start(cycleCtx, "BMKGPoller.PollCycle",
+				trace.WithAttributes(
+					attribute.String("poll.cursor", now.Format(time.RFC3339)),
+					attribute.Int64("fencing.token", lease.FencingToken),
+				),
 			)
 
 			events, warnings, err := poll(cycleCtx, now)
@@ -373,7 +405,11 @@ func main() {
 			}
 
 			published := true
+			maxOccurred := now
 			for _, data := range events {
+				if data.OccurredAt.After(maxOccurred) {
+					maxOccurred = data.OccurredAt
+				}
 				normalized := normalize(cycleCtx, data, warnings)
 				if err := SendToAggregate(cycleCtx, &normalized); err != nil {
 					slog.ErrorContext(cycleCtx, "BMKG publish failed; keeping cursor", "cursor", now.Format(time.RFC3339), "err", err)
@@ -386,7 +422,12 @@ func main() {
 
 			durationMs := float64(time.Since(cycleStart).Nanoseconds()) / 1e6
 			if published {
-				now = time.Now()
+				if maxOccurred.After(now) {
+					now = maxOccurred.Add(time.Millisecond)
+					if err := advanceLeaseCursor(cycleCtx, "BMKG", instanceID, lease.FencingToken, now); err != nil {
+						slog.WarnContext(cycleCtx, "failed to advance BMKG lease cursor", "err", err)
+					}
+				}
 				cycleSpan.SetStatus(otelcodes.Ok, "")
 				recordPollCycle(cycleCtx, "success", durationMs)
 			} else {

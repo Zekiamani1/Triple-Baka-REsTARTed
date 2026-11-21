@@ -65,7 +65,7 @@ export async function connectKafka(): Promise<void> {
 }
 
 export interface IngestConsumerHandlers {
-  onHazard: (hazard: Record<string, unknown>) => Promise<void>;
+  onHazard: (hazard: Record<string, unknown>, meta?: { fencingToken?: string }) => Promise<void>;
   onDlqMessage?: (dlq: Record<string, unknown>) => Promise<void>;
   onPoisonPill?: (info: {
     topic: string;
@@ -175,7 +175,9 @@ export async function runIngestConsumer(
             });
 
             try {
-              await handlers.onHazard(hazard);
+              const rawToken = message.headers?.["x-fencing-token"];
+              const fencingToken = rawToken ? rawToken.toString() : undefined;
+              await handlers.onHazard(hazard, { fencingToken });
               if (isRetryTopic && retryMeta?._dlq_message_id && handlers.onRetryRecovered) {
                 await handlers.onRetryRecovered(retryMeta._dlq_message_id);
               }

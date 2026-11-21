@@ -364,11 +364,45 @@ func main() {
 
 	listenAddress := envOrDefault("PVMBG_LISTEN_ADDR", ":8082")
 	fmt.Printf("Server is running on http://localhost%s\n", listenAddress)
-	handler := outageMiddleware(&outage, apiKeyMiddleware(pvmbg))
+	handler := upstreamLogMiddleware(outageMiddleware(&outage, apiKeyMiddleware(pvmbg)))
 
 	if err := http.ListenAndServe(listenAddress, handler); err != nil {
 		fmt.Printf("Server failed to start: %v\n", err)
 	}
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func upstreamLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/volcanic-reports" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		entry, _ := json.Marshal(map[string]any{
+			"time":            time.Now().UTC().Format(time.RFC3339Nano),
+			"method":          r.Method,
+			"path":            r.URL.Path,
+			"query":           r.URL.RawQuery,
+			"poller_instance": r.Header.Get("X-Poller-Instance"),
+			"fencing_token":   r.Header.Get("X-Fencing-Token"),
+			"correlation_id":  r.Header.Get("X-Correlation-ID"),
+			"status":          rec.status,
+			"duration_ms":     time.Since(start).Milliseconds(),
+		})
+		fmt.Println(string(entry))
+	})
 }
 
 func initdb() {

@@ -87,9 +87,15 @@ func pvmbgRequest(ctx context.Context, targetURL string) (*http.Response, error)
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+requiredEnv("PVMBG_API_KEY"))
+	req.Header.Set("X-Poller-Instance", pollerInstanceID())
+	if tok := ctx.Value(fencingTokenKey{}); tok != nil {
+		req.Header.Set("X-Fencing-Token", fmt.Sprintf("%v", tok))
+	}
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 	return httpClient().Do(req)
 }
+
+type fencingTokenKey struct{}
 
 func httpClient() *http.Client {
 	seconds, err := strconv.Atoi(envOrDefault("HTTP_TIMEOUT_SECONDS", "5"))
@@ -144,6 +150,12 @@ func SendToAggregate(ctx context.Context, thething *proto.Hazard) error {
 
 	var headers kafkaHeaderCarrier
 	otel.GetTextMapPropagator().Inject(ctx, &headers)
+	if tok := ctx.Value(fencingTokenKey{}); tok != nil {
+		headers = append(headers,
+			kafka.Header{Key: "x-fencing-token", Value: []byte(fmt.Sprintf("%v", tok))},
+			kafka.Header{Key: "x-leader-id", Value: []byte(pollerInstanceID())},
+		)
+	}
 
 	err = writer.WriteMessages(ctx, kafka.Message{
 		Key:     []byte(thething.HazardId),
@@ -302,11 +314,12 @@ func main() {
 
 	startHealthServer()
 	interval := pollInterval()
-	now := time.Now()
+	instanceID := pollerInstanceID()
+	now := time.Now().Add(-10 * time.Minute)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	slog.InfoContext(ctx, "PVMBG poller started", "interval_seconds", interval.Seconds())
+	slog.InfoContext(ctx, "PVMBG poller started", "instance_id", instanceID, "interval_seconds", interval.Seconds())
 
 	for {
 		select {
@@ -314,8 +327,27 @@ func main() {
 			return
 		case <-ticker.C:
 			cycleStart := time.Now()
-			cycleCtx, cycleSpan := otel.Tracer(pvmbgPollerScope).Start(ctx, "PVMBGPoller.PollCycle",
-				trace.WithAttributes(attribute.String("poll.cursor", now.Format(time.RFC3339))),
+			lease, err := acquireLease(ctx, "PVMBG", instanceID)
+			if err != nil {
+				slog.WarnContext(ctx, "PVMBG lease acquire failed; skipping cycle", "err", err)
+				continue
+			}
+			if !lease.Acquired {
+				slog.DebugContext(ctx, "PVMBG standby instance; leader is active", "leader_id", lease.LeaderID)
+				continue
+			}
+			if lease.Cursor != "" {
+				if parsed, err := time.Parse(time.RFC3339, lease.Cursor); err == nil {
+					now = parsed
+				}
+			}
+
+			cycleCtx := context.WithValue(ctx, fencingTokenKey{}, lease.FencingToken)
+			cycleCtx, cycleSpan := otel.Tracer(pvmbgPollerScope).Start(cycleCtx, "PVMBGPoller.PollCycle",
+				trace.WithAttributes(
+					attribute.String("poll.cursor", now.Format(time.RFC3339)),
+					attribute.Int64("fencing.token", lease.FencingToken),
+				),
 			)
 
 			events, err := poll(cycleCtx, now)
@@ -330,7 +362,11 @@ func main() {
 			}
 
 			published := true
+			maxReported := now
 			for _, data := range events {
+				if data.ReportedAt.After(maxReported) {
+					maxReported = data.ReportedAt
+				}
 				normalized := normalize(cycleCtx, data)
 				if err := SendToAggregate(cycleCtx, &normalized); err != nil {
 					slog.ErrorContext(cycleCtx, "PVMBG publish failed; keeping cursor", "cursor", now.Format(time.RFC3339), "err", err)
@@ -343,7 +379,12 @@ func main() {
 
 			durationMs := float64(time.Since(cycleStart).Nanoseconds()) / 1e6
 			if published {
-				now = time.Now()
+				if maxReported.After(now) {
+					now = maxReported.Add(time.Millisecond)
+					if err := advanceLeaseCursor(cycleCtx, "PVMBG", instanceID, lease.FencingToken, now); err != nil {
+						slog.WarnContext(cycleCtx, "failed to advance PVMBG lease cursor", "err", err)
+					}
+				}
 				cycleSpan.SetStatus(otelcodes.Ok, "")
 				recordPollCycle(cycleCtx, "success", durationMs)
 			} else {
