@@ -173,116 +173,33 @@ func (s *StateStore) LoadSourceStatus(ctx context.Context) (SourceStatus, error)
 // is recomputed from the age of last-known-good data, even when this page has no
 // valid observation. maxDataAge must be the same explicit policy used by validation.
 func (s *StateStore) RecordSuccessfulFetch(
-	ctx context.Context,
-	fetchedAt time.Time,
-	lastDataAt *time.Time,
-	observationID string,
-	maxDataAge time.Duration,
+	ctx context.Context, fetchedAt time.Time, lastDataAt *time.Time,
+	observationID string, maxDataAge time.Duration,
 ) error {
-	if err := s.ensureReady(); err != nil {
-		return err
-	}
-	if fetchedAt.IsZero() || maxDataAge <= 0 {
-		return fmt.Errorf("fetchedAt and maxDataAge must be valid")
-	}
-
-	latest, err := s.latestDataAt(ctx, lastDataAt)
-	if err != nil {
-		return err
-	}
-	setFields := bson.D{
+	return s.updateSourceState(ctx, lastDataAt, observationID, fetchedAt, maxDataAge, bson.D{
 		{Key: "last_success_at", Value: fetchedAt.UTC()},
 		{Key: "upstream_status", Value: "available"},
-		{Key: "data_status", Value: freshnessStatus(latest, fetchedAt.UTC(), maxDataAge)},
-		{Key: "updated_at", Value: fetchedAt.UTC()},
-	}
-	if latest != nil && !latest.IsZero() {
-		setFields = append(setFields, bson.E{Key: "last_data_at", Value: latest.UTC()})
-	}
-	if strings.TrimSpace(observationID) != "" {
-		setFields = append(setFields, bson.E{Key: "last_observation_id", Value: strings.TrimSpace(observationID)})
-	}
-
-	_, err = s.collection.UpdateOne(ctx,
-		bson.D{{Key: "_id", Value: stateDocumentID}},
-		bson.D{
-			{Key: "$set", Value: setFields},
-			{Key: "$unset", Value: bson.D{{Key: "last_error", Value: ""}}},
-		}, options.Update().SetUpsert(true))
-	if err != nil {
-		return fmt.Errorf("record successful Sensor Pantai fetch: %w", redactMongoURIDetails(err))
-	}
-	return nil
+	}, true)
 }
 
 // RecordSourceFailure marks upstream connectivity unavailable while keeping
 // data freshness derived from last-known-good observation age.
 func (s *StateStore) RecordSourceFailure(ctx context.Context, failure error, failedAt time.Time, maxDataAge time.Duration) error {
-	if err := s.ensureReady(); err != nil {
-		return err
-	}
-	if failedAt.IsZero() || maxDataAge <= 0 {
-		return fmt.Errorf("failedAt and maxDataAge must be valid")
-	}
 	message := "unknown upstream failure"
 	if failure != nil {
 		message = failure.Error()
 	}
-	message = truncateString(message, 1024)
-	failedAt = failedAt.UTC()
-	latest, err := s.latestDataAt(ctx, nil)
-	if err != nil {
-		return err
-	}
-	_, err = s.collection.UpdateOne(ctx,
-		bson.D{{Key: "_id", Value: stateDocumentID}},
-		bson.D{{Key: "$set", Value: bson.D{
-			{Key: "upstream_status", Value: "unavailable"},
-			{Key: "data_status", Value: freshnessStatus(latest, failedAt, maxDataAge)},
-			{Key: "last_failure_at", Value: failedAt},
-			{Key: "last_error", Value: message},
-			{Key: "updated_at", Value: failedAt},
-		}}}, options.Update().SetUpsert(true))
-	if err != nil {
-		return fmt.Errorf("record Sensor Pantai failure: %w", redactMongoURIDetails(err))
-	}
-	return nil
+	return s.updateSourceState(ctx, nil, "", failedAt, maxDataAge, bson.D{
+		{Key: "upstream_status", Value: "unavailable"},
+		{Key: "last_failure_at", Value: failedAt.UTC()},
+		{Key: "last_error", Value: truncateString(message, 1024)},
+	}, false)
 }
 
 // RefreshDataStatus recomputes fresh/stale/unavailable on startup and during
 // polling. It prevents a persisted "fresh" value from remaining fresh forever.
 func (s *StateStore) RefreshDataStatus(ctx context.Context, now time.Time, maxDataAge time.Duration) error {
-	if err := s.ensureReady(); err != nil {
-		return err
-	}
-	if now.IsZero() || maxDataAge <= 0 {
-		return fmt.Errorf("now and maxDataAge must be valid")
-	}
-	latest, err := s.latestDataAt(ctx, nil)
-	if err != nil {
-		return err
-	}
-	desiredStatus := freshnessStatus(latest, now.UTC(), maxDataAge)
-	var current struct {
-		DataStatus string `bson:"data_status"`
-	}
-	findErr := s.collection.FindOne(ctx, bson.D{{Key: "_id", Value: stateDocumentID}}).Decode(&current)
-	if findErr != nil && !errors.Is(findErr, mongo.ErrNoDocuments) {
-		return fmt.Errorf("read current Sensor Pantai data status: %w", redactMongoURIDetails(findErr))
-	}
-	if current.DataStatus == desiredStatus {
-		return nil
-	}
-	_, err = s.collection.UpdateOne(ctx,
-		bson.D{{Key: "_id", Value: stateDocumentID}},
-		bson.D{{Key: "$set", Value: bson.D{
-			{Key: "data_status", Value: desiredStatus},
-			{Key: "updated_at", Value: now.UTC()},
-		}}}, options.Update().SetUpsert(true))
-	if err != nil {
-		return fmt.Errorf("refresh Sensor Pantai data status: %w", redactMongoURIDetails(err))
-	}
-	return nil
+	return s.updateSourceState(ctx, nil, "", now, maxDataAge, nil, false)
 }
 
 // MarkDataUnavailable records that no usable last-known-good observation exists.
@@ -310,84 +227,80 @@ func (s *StateStore) MarkDataUnavailable(ctx context.Context, at time.Time, reas
 // retryable observation has been recovered and its HazardEvent is durably
 // acknowledged by Kafka. It never moves the stored observation time backward.
 func (s *StateStore) RecordLastGoodObservation(
-	ctx context.Context,
-	observedAt time.Time,
-	observationID string,
-	recordedAt time.Time,
-	maxDataAge time.Duration,
+	ctx context.Context, observedAt time.Time, observationID string,
+	recordedAt time.Time, maxDataAge time.Duration,
 ) error {
-	if err := s.ensureReady(); err != nil {
-		return err
+	if observedAt.IsZero() {
+		return fmt.Errorf("observedAt must not be zero")
 	}
-	if observedAt.IsZero() || recordedAt.IsZero() || maxDataAge <= 0 {
-		return fmt.Errorf("observedAt, recordedAt, and maxDataAge must be valid")
-	}
-	latest, err := s.latestDataAt(ctx, &observedAt)
-	if err != nil {
-		return err
-	}
-	setFields := bson.D{
-		{Key: "last_data_at", Value: latest.UTC()},
-		{Key: "data_status", Value: freshnessStatus(latest, recordedAt.UTC(), maxDataAge)},
-		{Key: "updated_at", Value: recordedAt.UTC()},
-	}
-	if strings.TrimSpace(observationID) != "" {
-		setFields = append(setFields, bson.E{Key: "last_observation_id", Value: strings.TrimSpace(observationID)})
-	}
-	_, err = s.collection.UpdateOne(ctx,
-		bson.D{{Key: "_id", Value: stateDocumentID}},
-		bson.D{{Key: "$set", Value: setFields}},
-		options.Update().SetUpsert(true))
-	if err != nil {
-		return fmt.Errorf("record recovered Sensor Pantai observation: %w", redactMongoURIDetails(err))
-	}
-	return nil
+	return s.updateSourceState(ctx, &observedAt, observationID, recordedAt, maxDataAge, nil, false)
 }
 
 // CommitPage atomically records the cursor and freshness metadata after every
 // item in the page has been durably published or retained for retry/quarantine.
 func (s *StateStore) CommitPage(
-	ctx context.Context,
-	cursor string,
-	fetchedAt time.Time,
-	lastDataAt *time.Time,
-	observationID string,
-	maxDataAge time.Duration,
+	ctx context.Context, cursor string, fetchedAt time.Time, lastDataAt *time.Time,
+	observationID string, maxDataAge time.Duration,
+) error {
+	return s.updateSourceState(ctx, lastDataAt, observationID, fetchedAt, maxDataAge, bson.D{
+		{Key: "cursor", Value: cursor},
+		{Key: "checkpoint_updated_at", Value: fetchedAt.UTC()},
+		{Key: "last_success_at", Value: fetchedAt.UTC()},
+		{Key: "upstream_status", Value: "available"},
+	}, true)
+}
+
+// updateSourceState evaluates last-good time and freshness inside one MongoDB
+// update. Polling and recovery can publish concurrently without an older retry
+// overwriting newer data metadata. Only the polling caller supplies a cursor.
+func (s *StateStore) updateSourceState(
+	ctx context.Context, candidate *time.Time, observationID string, now time.Time,
+	maxAge time.Duration, fields bson.D, clearError bool,
 ) error {
 	if err := s.ensureReady(); err != nil {
 		return err
 	}
-	if fetchedAt.IsZero() || maxDataAge <= 0 {
-		return fmt.Errorf("fetchedAt and maxDataAge must be valid")
+	if now.IsZero() || maxAge <= 0 {
+		return fmt.Errorf("time and max data age must be valid")
 	}
-
-	latest, err := s.latestDataAt(ctx, lastDataAt)
+	literal := func(value any) bson.D { return bson.D{{Key: "$literal", Value: value}} }
+	set := bson.D{{Key: "updated_at", Value: literal(now.UTC())}}
+	for _, field := range fields {
+		set = append(set, bson.E{Key: field.Key, Value: literal(field.Value)})
+	}
+	if candidate != nil && !candidate.IsZero() {
+		at := literal(candidate.UTC())
+		previous := bson.D{{Key: "$ifNull", Value: bson.A{"$last_data_at", nil}}}
+		if strings.TrimSpace(observationID) != "" {
+			set = append(set, bson.E{Key: "last_observation_id", Value: bson.D{{Key: "$cond", Value: bson.A{
+				bson.D{{Key: "$gte", Value: bson.A{at, previous}}},
+				literal(strings.TrimSpace(observationID)),
+				"$last_observation_id",
+			}}}})
+		}
+		set = append(set, bson.E{Key: "last_data_at", Value: bson.D{{Key: "$max", Value: bson.A{previous, at}}}})
+	}
+	status := bson.D{{Key: "$cond", Value: bson.A{
+		bson.D{{Key: "$eq", Value: bson.A{
+			bson.D{{Key: "$ifNull", Value: bson.A{"$last_data_at", nil}}}, nil,
+		}}},
+		"unavailable",
+		bson.D{{Key: "$cond", Value: bson.A{
+			bson.D{{Key: "$gte", Value: bson.A{"$last_data_at", literal(now.UTC().Add(-maxAge))}}},
+			"fresh", "stale",
+		}}},
+	}}}
+	pipeline := mongo.Pipeline{
+		bson.D{{Key: "$set", Value: set}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "data_status", Value: status}}}},
+	}
+	if clearError {
+		pipeline = append(pipeline, bson.D{{Key: "$unset", Value: "last_error"}})
+	}
+	_, err := s.collection.UpdateOne(ctx, bson.D{{Key: "_id", Value: stateDocumentID}},
+		pipeline, options.Update().SetUpsert(true))
 	if err != nil {
-		return err
-	}
-	fetchedAt = fetchedAt.UTC()
-	setFields := bson.D{
-		{Key: "cursor", Value: cursor},
-		{Key: "checkpoint_updated_at", Value: fetchedAt},
-		{Key: "last_success_at", Value: fetchedAt},
-		{Key: "upstream_status", Value: "available"},
-		{Key: "data_status", Value: freshnessStatus(latest, fetchedAt, maxDataAge)},
-		{Key: "updated_at", Value: fetchedAt},
-	}
-	if latest != nil && !latest.IsZero() {
-		setFields = append(setFields, bson.E{Key: "last_data_at", Value: latest.UTC()})
-	}
-	if strings.TrimSpace(observationID) != "" {
-		setFields = append(setFields, bson.E{Key: "last_observation_id", Value: strings.TrimSpace(observationID)})
-	}
-	_, err = s.collection.UpdateOne(ctx,
-		bson.D{{Key: "_id", Value: stateDocumentID}},
-		bson.D{
-			{Key: "$set", Value: setFields},
-			{Key: "$unset", Value: bson.D{{Key: "last_error", Value: ""}}},
-		}, options.Update().SetUpsert(true))
-	if err != nil {
-		return fmt.Errorf("commit Sensor Pantai page checkpoint: %w", redactMongoURIDetails(err))
+		return fmt.Errorf("update Sensor Pantai source state: %w", redactMongoURIDetails(err))
 	}
 	return nil
 }

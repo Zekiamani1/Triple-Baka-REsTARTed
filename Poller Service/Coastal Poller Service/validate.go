@@ -137,8 +137,9 @@ func ValidateObservation(
 	}
 
 	// Check event-time freshness before station lookup. Otherwise an old
-	// observation from an unknown station could be retried forever even though
-	// its timestamp has already expired.
+	// observation from an unknown station must not enter the recovery queue if
+	// it was already expired on receipt. For recovery, now is the persisted
+	// first-receipt time, so waiting for metadata does not invalidate the event.
 	observedAt := observation.ObservedAt.UTC()
 	referenceTime := now.UTC()
 	age := referenceTime.Sub(observedAt)

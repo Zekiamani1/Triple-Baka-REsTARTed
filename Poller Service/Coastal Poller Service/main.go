@@ -25,6 +25,7 @@ const (
 	stateOperationTimeout   = 5 * time.Second
 	shutdownWaitTimeout     = 15 * time.Second
 	retryableBatchLimit     = 100
+	retryCycleTimeout       = 5 * time.Second
 	initialRetryBackoff     = 5 * time.Second
 	maximumRetryBackoff     = 5 * time.Second
 	maxDurationMilliseconds = int64((1<<63 - 1) / int64(time.Millisecond))
@@ -238,6 +239,53 @@ func (a *CoastalAdapter) Run(ctx context.Context, initialCursor string) error {
 	if a == nil {
 		return fmt.Errorf("coastal adapter is nil")
 	}
+	// Recovery has its own cache and Kafka writers. A slow retry batch must not
+	// occupy the polling loop or batch new observations behind recovery writes.
+	retryPublisher, err := NewKafkaPublisher(a.config)
+	if err != nil {
+		return fmt.Errorf("initialize recovery publisher: %w", err)
+	}
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	recovery := *a
+	recovery.stations = make(map[string]Station)
+	recovery.publisher = retryPublisher
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		recovery.runRecovery(workerCtx)
+	}()
+	err = a.runPolling(workerCtx, initialCursor)
+	cancel()
+	<-done // run() must not close shared storage/telemetry while recovery uses them.
+	if closeErr := retryPublisher.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+func (a *CoastalAdapter) runRecovery(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		cycleCtx, cancel := context.WithTimeout(ctx, retryCycleTimeout)
+		err := a.retryUnknownStations(cycleCtx)
+		cancel()
+		if err != nil && ctx.Err() == nil {
+			a.logger.Warn("recovery failed; durable retry records retained", "error", err)
+		}
+		timer := time.NewTimer(a.config.PollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func (a *CoastalAdapter) runPolling(ctx context.Context, initialCursor string) error {
 
 	cursor := initialCursor
 	nextDelay := a.config.PollInterval
@@ -249,9 +297,6 @@ func (a *CoastalAdapter) Run(ctx context.Context, initialCursor string) error {
 		}
 		freshnessCancel()
 
-		if err := a.retryUnknownStations(ctx); err != nil && ctx.Err() == nil {
-			a.logger.Warn("retrying unknown-station observations failed; durable retry records retained", "error", err)
-		}
 		newCursor, advanced, err := a.pollOnce(ctx, cursor)
 		if err != nil {
 			if errors.Is(err, ErrCircuitOpen) {
@@ -330,8 +375,9 @@ func (a *CoastalAdapter) pollOnce(ctx context.Context, cursor string) (string, b
 		return cursor, false, err
 	}
 
+	receivedAt := time.Now().UTC()
 	pageSpan.SetAttributes(attribute.Int("observations.count", len(page.Items)))
-	pageHasFreshData := pageHasFreshObservation(page.Items, time.Now().UTC(), a.policy)
+	pageHasFreshData := pageHasFreshObservation(page.Items, receivedAt, a.policy)
 	// An empty page is a successful no-new-data poll. A non-empty page with no
 	// fresh observation is not considered healthy, even when its JSON envelope
 	// and HTTP status are valid.
@@ -368,17 +414,16 @@ func (a *CoastalAdapter) pollOnce(ctx context.Context, cursor string) (string, b
 			continue
 		}
 
-		reading, reason := ValidateObservationRecord(record, a.stations, a.policy, time.Now().UTC())
+		reading, reason := ValidateObservationRecord(record, a.stations, a.policy, receivedAt)
 		if reason == ReasonUnknownStation && !refreshedStations {
 			refreshedStations = true
 			if refreshErr := a.refreshStations(itemCtx); refreshErr != nil {
 				a.logger.Warn("station metadata refresh failed", "correlation_id", correlationID, "error", refreshErr)
 			}
-			reading, reason = ValidateObservationRecord(record, a.stations, a.policy, time.Now().UTC())
+			reading, reason = ValidateObservationRecord(record, a.stations, a.policy, receivedAt)
 		}
 
 		if reason == ReasonUnknownStation {
-			receivedAt := time.Now().UTC()
 			retryRecord, enqueueErr := a.state.SaveRetryableObservation(itemCtx, record, receivedAt, correlationID)
 			if enqueueErr != nil {
 				itemSpan.RecordError(enqueueErr)
@@ -532,7 +577,7 @@ func (a *CoastalAdapter) pollOnce(ctx context.Context, cursor string) (string, b
 }
 
 // retryUnknownStations reprocesses durable observations whose station metadata
-// was unknown at first receipt. It runs on every adapter cycle, but only loads
+// was unknown at first receipt. A separate recovery worker only loads
 // records whose NextAttemptAt is due. Once metadata appears, the observation
 // is normalized and published; the retry record is removed only after Kafka
 // acknowledges both the HazardEvent and its recovered quarantine status.
@@ -555,7 +600,7 @@ func (a *CoastalAdapter) retryUnknownStations(ctx context.Context) error {
 
 	retryCtx, retrySpan := a.telemetry.StartSpan(ctx, "sensor_pantai.retry_unknown_stations")
 	defer retrySpan.End()
-	if err := a.refreshStations(retryCtx); err != nil {
+	if err := a.refreshStationsUsing(retryCtx, a.sensor.FetchStationsForRetry); err != nil {
 		for _, item := range pending {
 			a.scheduleRetry(retryCtx, item, err)
 		}
@@ -564,6 +609,9 @@ func (a *CoastalAdapter) retryUnknownStations(ctx context.Context) error {
 
 	var firstErr error
 	for _, item := range pending {
+		if err := ctx.Err(); err != nil {
+			return err // Leave all unprocessed items durable for the next cycle.
+		}
 		itemCtx, itemSpan := a.telemetry.StartSpan(retryCtx, "sensor_pantai.retry_observation")
 		itemSpan.SetAttributes(
 			attribute.String("message.id", item.MessageID),
@@ -607,7 +655,9 @@ func (a *CoastalAdapter) retryUnknownStations(ctx context.Context) error {
 		}
 
 		record := ObservationRecord{Raw: append([]byte(nil), item.Raw...), Observation: &observation}
-		reading, reason := ValidateObservationRecord(record, a.stations, a.policy, time.Now().UTC())
+		// Queueing time is not a source contract violation. Validate timestamps
+		// against first receipt, while display freshness uses the current time.
+		reading, reason := ValidateObservationRecord(record, a.stations, a.policy, item.ReceivedAt)
 		if reason == ReasonUnknownStation {
 			a.scheduleRetry(itemCtx, item, fmt.Errorf("station %q is still unknown", observation.StationID))
 			itemSpan.SetAttributes(attribute.String("retry.outcome", "station_still_unknown"))
@@ -728,11 +778,15 @@ func pageHasFreshObservation(records []ObservationRecord, now time.Time, policy 
 }
 
 func (a *CoastalAdapter) refreshStations(ctx context.Context) error {
+	return a.refreshStationsUsing(ctx, a.sensor.FetchStations)
+}
+
+func (a *CoastalAdapter) refreshStationsUsing(ctx context.Context, fetch func(context.Context) ([]Station, error)) error {
 	spanCtx, span := a.telemetry.StartSpan(ctx, "sensor_pantai.fetch_stations")
 	defer span.End()
 
 	startedAt := time.Now()
-	stations, err := a.sensor.FetchStations(spanCtx)
+	stations, err := fetch(spanCtx)
 	outcome := "success"
 	if err != nil {
 		outcome = upstreamOutcome(err)

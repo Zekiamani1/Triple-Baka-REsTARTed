@@ -302,6 +302,27 @@ func (c *SensorClient) FetchStations(ctx context.Context) ([]Station, error) {
 	return stations, nil
 }
 
+// Recovery must not consume a HALF_OPEN observation probe or reset the
+// observation failure counter just because station metadata is reachable.
+func (c *SensorClient) FetchStationsForRetry(ctx context.Context) ([]Station, error) {
+	state, _, until := c.breaker.State()
+	if state != CircuitClosed {
+		return nil, &CircuitOpenError{RetryAt: until}
+	}
+	var envelope stationsEnvelope
+	if err := c.getJSON(ctx, stationsPath, nil, true, &envelope); err != nil {
+		if ctx.Err() == nil {
+			c.breaker.recordFailure()
+		}
+		return nil, err
+	}
+	if envelope.Items == nil {
+		c.breaker.recordFailure()
+		return nil, fmt.Errorf("invalid stations response: missing or null items")
+	}
+	return *envelope.Items, nil
+}
+
 // FetchObservations retrieves one cursor-based page. The cursor is opaque and
 // is passed back to the sensor unchanged; an empty cursor is omitted so the
 // source applies its initial-page behavior. It checks breaker permission and
