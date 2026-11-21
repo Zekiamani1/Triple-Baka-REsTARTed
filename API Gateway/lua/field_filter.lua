@@ -164,6 +164,14 @@ end
 local FULL_SCOPE = "hazard:read:full"
 local FILTERED_FIELD = { "sourceRefId", "latitude", "longitude", "attributes" }
 
+local function has_scope(scope_str, target)
+    if type(scope_str) ~= "string" then return false end
+    for token in scope_str:gmatch("%S+") do
+        if token == target then return true end
+    end
+    return false
+end
+
 local function strip(hazard)
     for _, field in ipairs(FILTERED_FIELD) do hazard[field] = nil end
     return hazard
@@ -184,7 +192,7 @@ function envoy_on_response(response_handle)
   local jwt = info:dynamicMetadata():get("envoy.filters.http.jwt_authn")
   local scope = jwt and jwt["jwt_payload"] and jwt["jwt_payload"]["scope"]
   response_handle:logInfo("field_filter: scope=" .. tostring(scope))
-  if scope == FULL_SCOPE then return end
+  if has_scope(scope, FULL_SCOPE) then return end
 
   local content_type = response_handle:headers():get("content-type") or ""
   response_handle:logInfo("field_filter: type=" .. tostring(content_type))

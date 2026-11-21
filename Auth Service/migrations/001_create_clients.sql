@@ -1,7 +1,7 @@
 CREATE TABLE clients (
     client_id       VARCHAR(20) PRIMARY KEY,
     client_secret   VARCHAR(100) NOT NULL,
-    scope           VARCHAR(20) NOT NULL,
+    scope           TEXT NOT NULL,
     display_name    VARCHAR(100),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

@@ -45,6 +45,22 @@ static_resources:
                             envoy.filters.http.jwt_authn:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
                               requirement_name: auth_provider
+                        - match: { prefix: "/internal/dlq/"}
+                          route:
+                            cluster: aggregator_http
+                            timeout: 30s
+                          typed_per_filter_config:
+                            envoy.filters.http.jwt_authn:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                              requirement_name: auth_provider
+                        - match: { prefix: "/field-reports"}
+                          route:
+                            cluster: aggregator_http
+                            timeout: 15s
+                          typed_per_filter_config:
+                            envoy.filters.http.jwt_authn:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                              requirement_name: auth_provider
                 http_filters:
                   - name: envoy.filters.http.cors
                     typed_config:
@@ -147,6 +163,19 @@ static_resources:
               - endpoint:
                   address:
                     socket_address: { address: aggregate, port_value: 50051 }
+    - name: aggregator_http
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      connect_timeout: 3s
+      dns_lookup_family: V4_ONLY
+      dns_refresh_rate: 2s
+      load_assignment:
+        cluster_name: aggregator_http
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: aggregate-http, port_value: 50052 }
 
 admin:
   address:

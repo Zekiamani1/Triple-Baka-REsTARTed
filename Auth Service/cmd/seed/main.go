@@ -24,13 +24,13 @@ func main() {
 		{
 			ClientID:    "lapangan",
 			PlainSecret: os.Getenv("CLIENT_LAPANGAN_SECRET"),
-			Scope:       "hazard:read:full",
+			Scope:       "hazard:read:full field_report:write",
 			DisplayName: "Tim Lapangan",
 		},
 		{
 			ClientID:    "internal",
 			PlainSecret: os.Getenv("CLIENT_INTERNAL_SECRET"),
-			Scope:       "hazard:read:full",
+			Scope:       "hazard:read:full dlq:read dlq:replay",
 			DisplayName: "BNPB Pusat / Internal Ops",
 		},
 	}
@@ -41,6 +41,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer database.Close()
+	if _, err := database.ExecContext(cont, `ALTER TABLE clients ALTER COLUMN scope TYPE TEXT`); err != nil {
+		slog.WarnContext(cont, "alter clients.scope to TEXT skipped", "err", err)
+	}
 	repo := client.NewPostgresRepo(database)
 	err = client.SeedClients(cont, repo, clients)
 	if err != nil {
