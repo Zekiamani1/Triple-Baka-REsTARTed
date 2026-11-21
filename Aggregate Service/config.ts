@@ -22,6 +22,12 @@ export const mongo = {
   collection: required('MONGO_COLLECTION', 'hazard_events'),
 };
  
+const rawMode = (process.env.AGGREGATE_MODE ?? 'all').trim().toLowerCase();
+if (rawMode !== 'api' && rawMode !== 'ingester' && rawMode !== 'all') {
+  throw new Error(`Invalid AGGREGATE_MODE: ${rawMode} (expected api, ingester, or all)`);
+}
+
 export const service = {
   port: parseInt(required('AGGREGATOR_PORT', '50051'), 10),
+  mode: rawMode as 'api' | 'ingester' | 'all',
 };

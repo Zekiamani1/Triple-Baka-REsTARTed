@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -25,6 +27,84 @@ import (
 )
 
 const bmkgPollerScope = "bmkg-poller"
+
+var (
+	pollCyclesCounter       metric.Int64Counter
+	pollDurationHist        metric.Float64Histogram
+	httpClientDurationHist  metric.Float64Histogram
+	eventsFetchedCounter    metric.Int64Counter
+	kafkaPublishedCounter   metric.Int64Counter
+	kafkaPublishDurationHist metric.Float64Histogram
+)
+
+func initInstruments(m metric.Meter) {
+	if c, err := m.Int64Counter(
+		"bmkg_poller.poll.cycles_total",
+		metric.WithDescription("Total number of BMKG polling cycles executed"),
+	); err == nil {
+		pollCyclesCounter = c
+	}
+	if h, err := m.Float64Histogram(
+		"bmkg_poller.poll.duration_ms",
+		metric.WithDescription("Duration of BMKG polling cycles in milliseconds"),
+		metric.WithUnit("ms"),
+	); err == nil {
+		pollDurationHist = h
+	}
+	if h, err := m.Float64Histogram(
+		"bmkg_poller.http.client_duration_ms",
+		metric.WithDescription("Duration of outbound HTTP requests to BMKG in milliseconds"),
+		metric.WithUnit("ms"),
+	); err == nil {
+		httpClientDurationHist = h
+	}
+	if c, err := m.Int64Counter(
+		"bmkg_poller.events.fetched_total",
+		metric.WithDescription("Total number of events fetched from BMKG"),
+	); err == nil {
+		eventsFetchedCounter = c
+	}
+	if c, err := m.Int64Counter(
+		"bmkg_poller.kafka.published_total",
+		metric.WithDescription("Total number of normalized hazard events published to Kafka"),
+	); err == nil {
+		kafkaPublishedCounter = c
+	}
+	if h, err := m.Float64Histogram(
+		"bmkg_poller.kafka.publish_duration_ms",
+		metric.WithDescription("Duration of publishing hazard events to Kafka in milliseconds"),
+		metric.WithUnit("ms"),
+	); err == nil {
+		kafkaPublishDurationHist = h
+	}
+}
+
+func samplerFromEnv() sdktrace.Sampler {
+	samplerName := strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER")))
+	ratio := 0.05
+	if rawArg := strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")); rawArg != "" {
+		if parsed, err := strconv.ParseFloat(rawArg, 64); err == nil && parsed >= 0 && parsed <= 1 {
+			ratio = parsed
+		}
+	}
+
+	switch samplerName {
+	case "always_on":
+		return sdktrace.AlwaysSample()
+	case "always_off":
+		return sdktrace.NeverSample()
+	case "traceidratio":
+		return sdktrace.TraceIDRatioBased(ratio)
+	case "parentbased_always_off":
+		return sdktrace.ParentBased(sdktrace.NeverSample())
+	case "parentbased_traceidratio":
+		return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
+	case "parentbased_always_on", "":
+		return sdktrace.ParentBased(sdktrace.AlwaysSample())
+	default:
+		return sdktrace.ParentBased(sdktrace.AlwaysSample())
+	}
+}
 
 type contextLogHandler struct {
 	slog.Handler
@@ -65,30 +145,18 @@ func (h *contextLogHandler) WithGroup(name string) slog.Handler {
 }
 
 func recordPollCycle(ctx context.Context, status string, durationMs float64) {
-	m := otel.Meter(bmkgPollerScope)
 	attrs := metric.WithAttributes(attribute.String("status", status))
-	if c, err := m.Int64Counter(
-		"bmkg_poller.poll.cycles_total",
-		metric.WithDescription("Total number of BMKG polling cycles executed"),
-	); err == nil {
-		c.Add(ctx, 1, attrs)
+	if pollCyclesCounter != nil {
+		pollCyclesCounter.Add(ctx, 1, attrs)
 	}
-	if h, err := m.Float64Histogram(
-		"bmkg_poller.poll.duration_ms",
-		metric.WithDescription("Duration of BMKG polling cycles in milliseconds"),
-		metric.WithUnit("ms"),
-	); err == nil {
-		h.Record(ctx, durationMs, attrs)
+	if pollDurationHist != nil {
+		pollDurationHist.Record(ctx, durationMs, attrs)
 	}
 }
 
 func recordHTTPClientDuration(ctx context.Context, endpoint string, statusCode int, durationMs float64) {
-	if h, err := otel.Meter(bmkgPollerScope).Float64Histogram(
-		"bmkg_poller.http.client_duration_ms",
-		metric.WithDescription("Duration of outbound HTTP requests to BMKG in milliseconds"),
-		metric.WithUnit("ms"),
-	); err == nil {
-		h.Record(ctx, durationMs, metric.WithAttributes(
+	if httpClientDurationHist != nil {
+		httpClientDurationHist.Record(ctx, durationMs, metric.WithAttributes(
 			attribute.String("endpoint", endpoint),
 			attribute.Int("status_code", statusCode),
 		))
@@ -96,32 +164,21 @@ func recordHTTPClientDuration(ctx context.Context, endpoint string, statusCode i
 }
 
 func recordEventsFetched(ctx context.Context, eventType string, count int) {
-	if c, err := otel.Meter(bmkgPollerScope).Int64Counter(
-		"bmkg_poller.events.fetched_total",
-		metric.WithDescription("Total number of events fetched from BMKG"),
-	); err == nil {
-		c.Add(ctx, int64(count), metric.WithAttributes(attribute.String("type", eventType)))
+	if eventsFetchedCounter != nil {
+		eventsFetchedCounter.Add(ctx, int64(count), metric.WithAttributes(attribute.String("type", eventType)))
 	}
 }
 
 func recordKafkaPublish(ctx context.Context, topic, severity, status string, durationMs float64) {
-	m := otel.Meter(bmkgPollerScope)
-	if c, err := m.Int64Counter(
-		"bmkg_poller.kafka.published_total",
-		metric.WithDescription("Total number of normalized hazard events published to Kafka"),
-	); err == nil {
-		c.Add(ctx, 1, metric.WithAttributes(
+	if kafkaPublishedCounter != nil {
+		kafkaPublishedCounter.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("topic", topic),
 			attribute.String("severity", severity),
 			attribute.String("status", status),
 		))
 	}
-	if h, err := m.Float64Histogram(
-		"bmkg_poller.kafka.publish_duration_ms",
-		metric.WithDescription("Duration of publishing hazard events to Kafka in milliseconds"),
-		metric.WithUnit("ms"),
-	); err == nil {
-		h.Record(ctx, durationMs, metric.WithAttributes(
+	if kafkaPublishDurationHist != nil {
+		kafkaPublishDurationHist.Record(ctx, durationMs, metric.WithAttributes(
 			attribute.String("topic", topic),
 			attribute.String("status", status),
 		))
@@ -170,6 +227,7 @@ func initTelemetry(ctx context.Context) (func(context.Context) error, error) {
 	}
 
 	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(samplerFromEnv()),
 		sdktrace.WithBatcher(traceExporter),
 		sdktrace.WithResource(res),
 	)
@@ -180,6 +238,7 @@ func initTelemetry(ctx context.Context) (func(context.Context) error, error) {
 		sdkmetric.WithResource(res),
 	)
 	otel.SetMeterProvider(mp)
+	initInstruments(otel.Meter(bmkgPollerScope))
 
 	lp := sdklog.NewLoggerProvider(
 		sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),

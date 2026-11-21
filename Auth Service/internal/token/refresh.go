@@ -48,7 +48,9 @@ func (this *PostgresRefreshRepo) Store(ctx context.Context, tokenHash, clientID 
 		INSERT INTO refresh_tokens (client_id, token_hash, expires_at)
 		VALUES ($1, $2, $3)
 	`
-	_, err := this.db.ExecContext(ctx, query, clientID, tokenHash, expiresAt.UTC())
+	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_, err := this.db.ExecContext(queryCtx, query, clientID, tokenHash, expiresAt.UTC())
 	durationMs := float64(time.Since(start).Nanoseconds()) / 1e6
 	telemetry.RecordDBQuery(ctx, "StoreRefreshToken", durationMs)
 	if err != nil {
@@ -75,7 +77,9 @@ func (this *PostgresRefreshRepo) Consume(ctx context.Context, tokenHash string) 
 		RETURNING client_id
 	`
 	var id string
-	err := this.db.QueryRowContext(ctx, query, tokenHash).Scan(&id)
+	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	err := this.db.QueryRowContext(queryCtx, query, tokenHash).Scan(&id)
 	durationMs := float64(time.Since(start).Nanoseconds()) / 1e6
 	telemetry.RecordDBQuery(ctx, "ConsumeRefreshToken", durationMs)
 	if errors.Is(err, sql.ErrNoRows) {

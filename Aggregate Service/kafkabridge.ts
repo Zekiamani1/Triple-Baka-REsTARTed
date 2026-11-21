@@ -29,6 +29,8 @@ const producer: Producer = kafka.producer({
 });
 const consumer: Consumer = kafka.consumer({ groupId: kafkaConfig.groupId });
 let consumerReady = false;
+let producerConnected = false;
+let consumerConnected = false;
 
 consumer.on(consumer.events.GROUP_JOIN, () => { consumerReady = true; });
 consumer.on(consumer.events.CRASH, () => { consumerReady = false; });
@@ -39,16 +41,26 @@ export function isKafkaReady(): boolean {
   return consumerReady;
 }
 
+export async function ensureProducerConnected(): Promise<void> {
+  if (producerConnected) return;
+  await producer.connect();
+  producerConnected = true;
+  logInfo("Kafka producer connected", { brokers: kafkaConfig.brokers });
+}
+
 export async function stopIngestConsumer(): Promise<void> {
   consumerReady = false;
+  if (!consumerConnected) return;
   await consumer.stop();
 }
 
 export async function connectKafka(): Promise<void> {
-  await producer.connect();
-  await consumer.connect();
+  await ensureProducerConnected();
+  if (!consumerConnected) {
+    await consumer.connect();
+    consumerConnected = true;
+  }
   await consumer.subscribe({ topic: kafkaConfig.inTopic, fromBeginning: true });
-  logInfo("Kafka producer connected", { brokers: kafkaConfig.brokers });
   logInfo("Kafka consumer listening", { topic: kafkaConfig.inTopic });
 }
 
@@ -187,6 +199,12 @@ export async function publishHazard(
 }
 
 export async function disconnectKafka(): Promise<void> {
-  await consumer.disconnect();
-  await producer.disconnect();
+  if (consumerConnected) {
+    await consumer.disconnect();
+    consumerConnected = false;
+  }
+  if (producerConnected) {
+    await producer.disconnect();
+    producerConnected = false;
+  }
 }

@@ -45,7 +45,14 @@ spec:
         timeoutSeconds: 15
         failureThreshold: 10
       affinity:
-        antiAffinityTopologyKey: "none"
+        antiAffinityTopologyKey: "kubernetes.io/hostname"
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
       expose:
         enabled: false
         type: ClusterIP
@@ -64,7 +71,14 @@ spec:
         timeoutSeconds: 15
         failureThreshold: 10
       affinity:
-        antiAffinityTopologyKey: "none"
+        antiAffinityTopologyKey: "kubernetes.io/hostname"
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1000m"
+          memory: "512Mi"
       expose:
         type: ClusterIP
   replsets:
@@ -83,7 +97,14 @@ spec:
         timeoutSeconds: 15
         failureThreshold: 10
       affinity:
-        antiAffinityTopologyKey: "none"
+        antiAffinityTopologyKey: "kubernetes.io/hostname"
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "384Mi"
+        limits:
+          cpu: "1500m"
+          memory: "1Gi"
       expose:
         enabled: false
         type: ClusterIP
@@ -107,7 +128,14 @@ spec:
         timeoutSeconds: 15
         failureThreshold: 10
       affinity:
-        antiAffinityTopologyKey: "none"
+        antiAffinityTopologyKey: "kubernetes.io/hostname"
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "384Mi"
+        limits:
+          cpu: "1500m"
+          memory: "1Gi"
       expose:
         enabled: false
         type: ClusterIP
@@ -224,6 +252,13 @@ spec:
           env:
             - name: PGDATA
               value: "/var/lib/postgresql/data/pgdata"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
           volumeMounts:
             - name: auth-db-data
               mountPath: /var/lib/postgresql/data

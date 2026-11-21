@@ -5,7 +5,7 @@ metadata:
   labels:
     app: otel-lgtm
 spec:
-  replicas: 0
+  replicas: 1
   strategy:
     type: Recreate
   selector:
@@ -15,11 +15,19 @@ spec:
     metadata:
       labels:
         app: otel-lgtm
+        role: other
     spec:
       containers:
         - name: otel-lgtm
           image: grafana/otel-lgtm:latest
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
           ports:
             - containerPort: 3000
               name: grafana
