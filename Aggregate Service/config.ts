@@ -13,6 +13,7 @@ export const kafka = {
   clientId: required('KAFKA_CLIENT_ID', 'bnpb-aggregate-service'),
   groupId: required('KAFKA_CONSUMER_GROUP', 'aggregate-ingestion'),
   inTopic: required('KAFKA_TOPIC_HAZARD_INGEST', 'hazard-ingest'),
+  expectedSource: process.env.KAFKA_EXPECTED_SOURCE?.trim() || undefined,
   outTopic: required('KAFKA_TOPIC_HAZARD_EVENTS', 'hazard-events'),
 };
  

@@ -79,6 +79,41 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  kafka-init-pantai:
+    image: apache/kafka:latest
+    depends_on:
+      kafka-aggregate:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        for topic in pantai-ingest pantai-quarantine; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic "$$topic" --partitions 3 --replication-factor 1
+        done
+  aggregate-pantai:
+    build: "./Aggregate Service"
+    env_file: "./Aggregate Service/.env"
+    environment:
+      KAFKA_BROKERS: kafka-aggregate:29092
+      KAFKA_CLIENT_ID: aggregate-pantai
+      KAFKA_CONSUMER_GROUP: aggregate-pantai-ingestion
+      KAFKA_TOPIC_HAZARD_INGEST: pantai-ingest
+      KAFKA_TOPIC_HAZARD_EVENTS: hazard-events
+      KAFKA_EXPECTED_SOURCE: SENSOR_PANTAI
+      AGGREGATOR_PORT: "50051"
+    depends_on:
+      mongo-aggregate:
+        condition: service_started
+      kafka-init:
+        condition: service_completed_successfully
+      kafka-init-pantai:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "grpcurl -plaintext -proto /app/health.proto -d '{\"service\":\"\"}' localhost:50051 grpc.health.v1.Health/Check | grep -q '\"SERVING\"'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
   bmkg:
     build: "./External System/BMKG"
     ports:

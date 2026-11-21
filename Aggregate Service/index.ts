@@ -66,13 +66,13 @@ function protoToHazard(protoHazard: any) {
         longitude: protoHazard.longitude,
         occurred_at: toDate(protoHazard.occurred_at),
         ingested_at: toDate(protoHazard.ingested_at),
-        attributes: protoHazard.attributes,
+        attributes: fromStruct(protoHazard.attributes),
     }
 }
 
 function withoutDeliveryState(document: any): Record<string, unknown> {
     const { _id, published, published_at, ...hazardEvent } = document;
-    return hazardEvent;
+    return { ...hazardEvent, attributes: plainAttributes(hazardEvent.attributes) };
 }
 
 async function trackMongoOp<T = any>(operation: string, fn: () => Promise<T>): Promise<T> {
@@ -107,11 +107,25 @@ async function ingestHazard(hazardEvent: any): Promise<void> {
         },
         async (span) => {
             try {
+                if (typeof hazardEvent.source !== "string" || !hazardEvent.source.trim() ||
+                    typeof hazardEvent.source_ref_id !== "string" || !hazardEvent.source_ref_id.trim() ||
+                    typeof hazardEvent.hazard_id !== "string" || !hazardEvent.hazard_id.trim()) {
+                    throw new Error("HazardEvent requires source, source_ref_id, and hazard_id");
+                }
+                const attributes = plainAttributes(hazardEvent.attributes);
+                if (hazardEvent.source === "SENSOR_PANTAI" || hazardEvent.hazard_type === "COASTAL") {
+                    if (hazardEvent.source !== "SENSOR_PANTAI" || hazardEvent.hazard_type !== "COASTAL" ||
+                        typeof attributes.critical !== "boolean") {
+                        throw new Error("Coastal events require SENSOR_PANTAI, COASTAL, and a boolean critical attribute");
+                    }
+                }
                 hazardEvent = {
                     ...hazardEvent,
                     occurred_at: toDate(hazardEvent.occurred_at),
                     ingested_at: toDate(hazardEvent.ingested_at),
-                    attributes: toStruct(hazardEvent.attributes),
+                    // Keep Kafka/storage attributes as plain JSON. Struct is
+                    // only the gRPC boundary representation.
+                    attributes,
                 };
                 const identity = {
                     source: hazardEvent.source,
@@ -301,7 +315,7 @@ async function listHazards(call: grpc.ServerUnaryCall<any, any>, callback: grpc.
                         ...h,
                         occurred_at: toProtoTimestamp(h.occurred_at),
                         ingested_at: toProtoTimestamp(h.ingested_at),
-                        attributes: toStruct(h.attributes),
+                        attributes: toStruct(plainAttributes(h.attributes)),
                     })),
                     total,
                 });
@@ -375,7 +389,7 @@ async function getHazard(call: grpc.ServerUnaryCall<any, any>, callback: grpc.se
                     ...hazardEvent,
                     occurred_at: toProtoTimestamp(hazardEvent.occurred_at),
                     ingested_at: toProtoTimestamp(hazardEvent.ingested_at),
-                    attributes: toStruct(hazardEvent.attributes),
+                    attributes: toStruct(plainAttributes(hazardEvent.attributes)),
                 });
             } catch (error: any) {
                 const durationMs = performance.now() - start;
@@ -509,14 +523,24 @@ function toStruct(obj: Record<string, unknown> | undefined): any {
 
 // protobuf Struct -> plain JS (for requests)
 function fromProtoValue(v: any): unknown {
-  switch (v?.kind) {
-    case "numberValue": return v.numberValue;
-    case "stringValue": return v.stringValue;
-    case "boolValue": return v.boolValue;
-    case "structValue": return fromStruct(v.structValue);
-    case "listValue": return (v.listValue?.values ?? []).map(fromProtoValue);
-    default: return null;
+  if (!v || typeof v !== "object") return null;
+  if ("number_value" in v || "numberValue" in v) return v.number_value ?? v.numberValue;
+  if ("string_value" in v || "stringValue" in v) return v.string_value ?? v.stringValue;
+  if ("bool_value" in v || "boolValue" in v) return v.bool_value ?? v.boolValue;
+  if ("struct_value" in v || "structValue" in v) return fromStruct(v.struct_value ?? v.structValue);
+  if ("list_value" in v || "listValue" in v) return ((v.list_value ?? v.listValue).values ?? []).map(fromProtoValue);
+  return null;
+}
+
+function plainAttributes(attributes: any): Record<string, unknown> {
+  if (!attributes || typeof attributes !== "object" || Array.isArray(attributes)) return {};
+  // Read documents written by the previous Struct-based storage path too.
+  if (Object.keys(attributes).length === 1 && attributes.fields &&
+      Object.values(attributes.fields).every((value: any) => value && typeof value === "object" &&
+        Object.keys(value).some(key => key === "kind" || key.endsWith("Value") || key.endsWith("_value")))) {
+    return fromStruct(attributes);
   }
+  return attributes;
 }
 
 function fromStruct(s: any): Record<string, unknown> {

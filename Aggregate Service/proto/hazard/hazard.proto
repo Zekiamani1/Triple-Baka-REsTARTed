@@ -24,11 +24,15 @@ enum Source {
     SOURCE_UNSPECIFIED = 0;
     BMKG = 1;
     PVMBG = 2;
+    SATELIT = 3;
+    SENSOR_PANTAI = 4;
 }
 enum HazardType {
     HAZARD_TYPE_UNSPECIFIED = 0;
     SEISMIC = 1;
     VOLCANIC = 2;
+    WILDFIRE = 3;
+    COASTAL = 4;
 }
 enum Severity {
     SEVERITY_UNSPECIFIED = 0;

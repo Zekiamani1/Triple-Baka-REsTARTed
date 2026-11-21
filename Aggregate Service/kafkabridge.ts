@@ -67,6 +67,9 @@ export async function runIngestConsumer(
             if (typeof hazard !== "object" || hazard === null || Array.isArray(hazard)) {
               throw new Error("Inbound HazardEvent must be a JSON object");
             }
+            if (kafkaConfig.expectedSource && hazard.source !== kafkaConfig.expectedSource) {
+              throw new Error(`Expected ${kafkaConfig.expectedSource} on ${topic}`);
+            }
 
             span.setAttributes({
               "hazard.id": String(hazard.hazard_id ?? ""),
