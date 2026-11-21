@@ -69,6 +69,15 @@ static_resources:
                             envoy.filters.http.jwt_authn:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
                               requirement_name: auth_provider
+                        - match: { prefix: "/analytics/"}
+                          route:
+                            cluster: aggregator_http
+                            timeout: 30s
+                        - match: { prefix: "/dashboard/"}
+                          route:
+                            cluster: analytics_dashboard
+                            prefix_rewrite: "/"
+                            timeout: 15s
                         - match: { prefix: "/internal/audit/"}
                           route:
                             cluster: aggregator_http
@@ -220,6 +229,17 @@ static_resources:
               - endpoint:
                   address:
                     socket_address: { address: otel-lgtm, port_value: 4317 }
+    - name: analytics_dashboard
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      connect_timeout: 3s
+      load_assignment:
+        cluster_name: analytics_dashboard
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: analytics-dashboard, port_value: 80 }
 
 admin:
   address:

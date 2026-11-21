@@ -71,4 +71,6 @@ message ListHazardsRequest {
 message ListHazardsResponse {
   repeated Hazard hazards = 1;
   int32 total = 2;
+  bool partial = 3;
+  repeated string unavailable_units = 4;
 }

@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-dashboard
+  labels:
+    app: analytics-dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: analytics-dashboard
+  template:
+    metadata:
+      labels:
+        app: analytics-dashboard
+        role: other
+    spec:
+      containers:
+        - name: analytics-dashboard
+          image: triple-baka-restarted-analytics-dashboard:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+              name: http
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-dashboard
+  labels:
+    app: analytics-dashboard
+spec:
+  type: NodePort
+  selector:
+    app: analytics-dashboard
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      nodePort: 30081

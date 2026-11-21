@@ -27,20 +27,27 @@ if (JSON.stringify(metadata.key) !== JSON.stringify(key))
   throw new Error("Unexpected existing shard key");
 const setup = db.getSiblingDB(databaseName).getCollection("_cluster_setup");
 if (!setup.findOne({ _id: namespace, rangesReady: true })) {
-  const boundary = { partition_key: "8", source: MinKey(), source_ref_id: MinKey() };
   const chunks = db.getSiblingDB("config").chunks;
-  if (!chunks.findOne({ uuid: metadata.uuid, "min.partition_key": "8" }))
-    command(admin.runCommand({ split: namespace, middle: boundary }));
-  const lower = chunks.find({ uuid: metadata.uuid }).sort({ min: 1 }).limit(1).next();
-  if (lower.shard !== "shard1RS")
-    command(admin.runCommand({ moveChunk: namespace,
-      find: { partition_key: "0", source: "", source_ref_id: "" }, to: "shard1RS" }));
-  const upper = chunks.findOne({ uuid: metadata.uuid, "min.partition_key": "8" });
-  if (upper.shard !== "shard2RS")
-    command(admin.runCommand({ moveChunk: namespace,
-      find: { partition_key: "9", source: "", source_ref_id: "" }, to: "shard2RS" }));
+  const boundaries = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"];
+  for (const b of boundaries) {
+    if (!chunks.findOne({ uuid: metadata.uuid, "min.partition_key": b })) {
+      command(admin.runCommand({ split: namespace, middle: { partition_key: b, source: MinKey(), source_ref_id: MinKey() } }));
+    }
+  }
+  const shards = ["shard1RS", "shard2RS"];
+  const allChunks = chunks.find({ uuid: metadata.uuid }).sort({ min: 1 }).toArray();
+  for (let i = 0; i < allChunks.length; i++) {
+    const targetShard = shards[i < allChunks.length / 2 ? 0 : 1];
+    if (allChunks[i].shard !== targetShard) {
+      command(admin.runCommand({ moveChunk: namespace, find: allChunks[i].min, to: targetShard }));
+    }
+  }
   setup.updateOne({ _id: namespace }, { $set: { rangesReady: true } }, { upsert: true });
 }
 events.createIndex({ hazard_id: 1 });
+events.createIndex({ ingested_at: 1, hazard_id: 1 });
+events.createIndex({ hazard_type: 1, occurred_at: -1 });
+events.createIndex({ severity: 1, occurred_at: -1 });
+events.createIndex({ area_name: 1 });
 events.createIndex({ ingested_at: -1, source: 1, source_ref_id: 1 });
 print(`${namespace}: sharded with unique event identity; initial hash ranges distributed`);

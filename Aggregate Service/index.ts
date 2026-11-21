@@ -34,6 +34,7 @@ import {
   startInternalHttpServer,
   type UnprocessedMessageDoc,
 } from "./dlqAndFieldReports";
+import { queryWithPartialFallback } from "./partialQuery";
 import type { Collection } from "mongodb";
 import type { Server as HttpServer } from "node:http";
 
@@ -298,36 +299,61 @@ async function aggregateEvent(call: grpc.ServerUnaryCall<any, any>, callback: gr
 
 const LIST_CACHE_TTL_MS = 2000;
 const LIST_CACHE_MAX_ENTRIES = 500;
-const listHazardsCache = new Map<string, { expiresAt: number; payload: { hazards: any[]; total: number } }>();
-const listHazardsInFlight = new Map<string, Promise<{ hazards: any[]; total: number }>>();
+const listHazardsCache = new Map<string, { expiresAt: number; payload: { hazards: any[]; total: number; partial: boolean; unavailable_units: string[] } }>();
+const listHazardsInFlight = new Map<string, Promise<{ hazards: any[]; total: number; partial: boolean; unavailable_units: string[] }>>();
 
 async function fetchListHazardsPayload(
     filter: Record<string, unknown>,
     limit: number,
     offset: number,
     span: any,
-): Promise<{ hazards: any[]; total: number }> {
+): Promise<{ hazards: any[]; total: number; partial: boolean; unavailable_units: string[] }> {
     const isUnfiltered = Object.keys(filter).length === 0;
-    const [hazards, total] = await Promise.all([
-        trackMongoOp("find", () =>
-            collection.find(filter, {
-                projection: { _id: 0, partition_key: 0, published: 0, published_at: 0 }
-            })
-            .sort({ ingested_at: -1, source: 1, source_ref_id: 1 })
-            .skip(offset)
-            .limit(limit)
-            .toArray()
-        ),
-        trackMongoOp(isUnfiltered ? "estimatedDocumentCount" : "countDocuments", () =>
-            isUnfiltered
-                ? collection.estimatedDocumentCount()
-                : collection.countDocuments(filter)
-        ),
-    ]);
+    const partialRes = await queryWithPartialFallback(
+        mongoClient,
+        mongo.dbName,
+        mongo.collection,
+        async (col, opts) => {
+            const [hazards, total] = await Promise.all([
+                trackMongoOp("find", () =>
+                    col
+                        .find(filter, { allowPartialResults: opts.allowPartialResults, maxTimeMS: opts.maxTimeMS })
+                        .project({
+                            _id: 0,
+                            hazard_id: 1,
+                            source: 1,
+                            source_ref_id: 1,
+                            hazard_type: 1,
+                            severity: 1,
+                            area_name: 1,
+                            latitude: 1,
+                            longitude: 1,
+                            occurred_at: 1,
+                            ingested_at: 1,
+                            attributes: 1,
+                        })
+                        .sort({ ingested_at: -1, source: 1, source_ref_id: 1 })
+                        .skip(offset)
+                        .limit(limit)
+                        .toArray()
+                ),
+                trackMongoOp(isUnfiltered ? "estimatedDocumentCount" : "countDocuments", () =>
+                    isUnfiltered
+                        ? col.estimatedDocumentCount({ maxTimeMS: opts.maxTimeMS })
+                        : col.countDocuments(filter, { maxTimeMS: opts.maxTimeMS })
+                ),
+            ]);
+            return { hazards, total };
+        },
+    );
+
+    const hazards = partialRes.data?.hazards ?? [];
+    const total = partialRes.data?.total ?? 0;
 
     span.setAttributes({
         "query.result_count": hazards.length,
         "query.total_count": total,
+        "query.partial": partialRes.partial,
     });
 
     return {
@@ -338,6 +364,8 @@ async function fetchListHazardsPayload(
             attributes: toStruct(h.attributes),
         })),
         total,
+        partial: partialRes.partial,
+        unavailable_units: partialRes.unavailable_units,
     };
 }
 
@@ -384,7 +412,7 @@ async function listHazards(call: grpc.ServerUnaryCall<any, any>, callback: grpc.
                 const cacheKey = `${filter.source ?? ""}|${filter.hazard_type ?? ""}|${filter.severity ?? ""}|${limit}|${offset}`;
                 const now = Date.now();
                 const cached = listHazardsCache.get(cacheKey);
-                let payload: { hazards: any[]; total: number };
+                let payload: { hazards: any[]; total: number; partial: boolean; unavailable_units: string[] };
 
                 if (cached && cached.expiresAt > now) {
                     span.setAttribute("query.cache_hit", true);

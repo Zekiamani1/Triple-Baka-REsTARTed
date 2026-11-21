@@ -13,6 +13,7 @@ resources:
   - k8s/networking.yaml
   - k8s/network-policies.yaml
   - k8s/rbac-audit.yaml
+  - k8s/analytics.yaml
 
 secretGenerator:
   - name: auth-env

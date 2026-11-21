@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Collection, Db, MongoClient } from "mongodb";
 import { handleAuditRoute } from "./auditServer";
+import { handleAnalyticsRoute } from "./analyticsServer";
 import {
   MAX_PAYLOAD_BYTES,
   PoisonPillError,
@@ -321,6 +322,16 @@ export function startInternalHttpServer(deps: {
           dbName: deps.dbName,
           collectionName: deps.collectionName,
           unprocessedCol: deps.unprocessedCol,
+        })
+      ) {
+        return;
+      }
+
+      if (
+        await handleAnalyticsRoute(req, res, url, {
+          mongoClient: deps.mongoClient,
+          dbName: deps.dbName,
+          collectionName: deps.collectionName,
         })
       ) {
         return;
