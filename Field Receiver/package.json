@@ -1,0 +1,25 @@
+{
+  "name": "field-receiver",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx index.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.223.1",
+    "@opentelemetry/instrumentation-http": "^0.223.1",
+    "@opentelemetry/resources": "^2.12.1",
+    "@opentelemetry/sdk-node": "^0.223.1",
+    "@opentelemetry/semantic-conventions": "^1.45.0",
+    "mongodb": "^6.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "tsx": "^4.23.15",
+    "typescript": "^5.8.3"
+  }
+}
