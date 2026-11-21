@@ -30,6 +30,9 @@ secretGenerator:
   - name: pvmbg-poller-env
     envs:
       - Poller Service/PVMBG Poller Service/.env
+  - name: audit-secret
+    envs:
+      - .env.example
 
 configMapGenerator:
   - name: kafka-env

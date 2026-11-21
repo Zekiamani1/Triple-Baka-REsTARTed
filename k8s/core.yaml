@@ -137,6 +137,8 @@ spec:
                 name: aggregate-env
             - secretRef:
                 name: mongo-cluster-secrets
+            - secretRef:
+                name: audit-secret
           env:
             - name: MONGO_URI
               value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin&readPreference=secondaryPreferred
@@ -171,6 +173,8 @@ spec:
                 name: aggregate-env
             - secretRef:
                 name: mongo-cluster-secrets
+            - secretRef:
+                name: audit-secret
           env:
             - name: NODE_OPTIONS
               value: "--max-old-space-size=384"
