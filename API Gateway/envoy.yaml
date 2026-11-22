@@ -14,6 +14,30 @@ static_resources:
                 codec_type: AUTO
                 generate_request_id: true
                 preserve_external_request_id: true
+                tracing:
+                  provider:
+                    name: envoy.tracers.opentelemetry
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: otel_collector
+                        timeout: 1s
+                      service_name: api-gateway
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          timestamp: "%START_TIME%"
+                          method: "%REQ(:METHOD)%"
+                          path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+                          response_code: "%RESPONSE_CODE%"
+                          duration_ms: "%DURATION%"
+                          correlation_id: "%REQ(X-CORRELATION-ID)%"
+                          traceparent: "%REQ(TRACEPARENT)%"
+                          upstream_host: "%UPSTREAM_HOST%"
                 route_config:
                   name: local_route
                   virtual_hosts:
@@ -94,6 +118,57 @@ static_resources:
                             prefix: "/.well-known/jwks.json"
                           route:
                             cluster: auth_service
+
+                        - match:
+                            prefix: "/analytics/"
+                          route:
+                            cluster: aggregator_http
+                            timeout: 30s
+                          typed_per_filter_config:
+                            envoy.filters.http.grpc_json_transcoder:
+                              "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                              disabled: true
+
+                        - match:
+                            prefix: "/dashboard/"
+                          route:
+                            cluster: analytics_dashboard
+                            prefix_rewrite: "/"
+                            timeout: 15s
+                          typed_per_filter_config:
+                            envoy.filters.http.grpc_json_transcoder:
+                              "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                              disabled: true
+
+                        - match:
+                            prefix: "/internal/audit/"
+                          route:
+                            cluster: aggregator_http
+                            timeout: 30s
+                          typed_per_filter_config:
+                            envoy.filters.http.grpc_json_transcoder:
+                              "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                              disabled: true
+
+                        - match:
+                            prefix: "/internal/dlq/"
+                          route:
+                            cluster: aggregator_http
+                            timeout: 30s
+                          typed_per_filter_config:
+                            envoy.filters.http.grpc_json_transcoder:
+                              "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                              disabled: true
+
+                        - match:
+                            prefix: "/field-reports"
+                          route:
+                            cluster: aggregator_http
+                            timeout: 15s
+                          typed_per_filter_config:
+                            envoy.filters.http.grpc_json_transcoder:
+                              "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                              disabled: true
 
                         # Media gets a deliberately smaller bucket. This route must
                         # precede the Field Team and fallback routes.
@@ -269,7 +344,7 @@ static_resources:
                       services: ["auth.v1.AuthService", "hazard.Aggregate"]
                       match_incoming_request_route: true
                       print_options:
-                        add_whitespace: true
+                        add_whitespace: false
                         always_print_primitive_fields: true
                       request_validation_options:
                         reject_unknown_method: true
@@ -325,12 +400,18 @@ static_resources:
             max_requests: 20000
             max_retries: 2000
       health_checks:
-        - timeout: 5s
-          interval: 10s
-          unhealthy_threshold: 3
+        - timeout: 2s
+          interval: 2s
+          unhealthy_threshold: 2
           healthy_threshold: 1
           grpc_health_check:
             service_name: hazard.Aggregate
+      outlier_detection:
+        consecutive_5xx: 3
+        consecutive_gateway_failure: 2
+        interval: 2s
+        base_ejection_time: 10s
+        max_ejection_percent: 50
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
@@ -345,6 +426,55 @@ static_resources:
                     socket_address:
                       address: aggregate
                       port_value: 50051
+
+    - name: aggregator_http
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      connect_timeout: 3s
+      dns_lookup_family: V4_ONLY
+      dns_refresh_rate: 2s
+      load_assignment:
+        cluster_name: aggregator_http
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: aggregate-http
+                      port_value: 50052
+
+    - name: otel_collector
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      connect_timeout: 2s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: otel_collector
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: otel-lgtm
+                      port_value: 4317
+
+    - name: analytics_dashboard
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      connect_timeout: 3s
+      load_assignment:
+        cluster_name: analytics_dashboard
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: analytics-dashboard
+                      port_value: 80
 
 admin:
   address:

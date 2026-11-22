@@ -8,6 +8,7 @@ import {
   isCriticalCoastal,
   isEmergency,
   parseHazardMessage,
+  PoisonPillError,
 } from "./message";
 import { deliverWithRetry } from "./delivery";
 import {
@@ -220,6 +221,32 @@ async function handleCriticalMessage(payload: EachMessagePayload): Promise<void>
   });
 }
 
+async function handleWithPoisonPillPolicy(
+  consumer: Consumer,
+  payload: EachMessagePayload,
+  handler: (payload: EachMessagePayload) => Promise<void>,
+): Promise<void> {
+  const startedAt = performance.now();
+  try {
+    await handler(payload);
+  } catch (error) {
+    if (!(error instanceof PoisonPillError) || payload.topic === kafkaConfig.criticalTopic) {
+      throw error;
+    }
+    logError("invalid hazard message skipped by general consumer", {
+      topic: payload.topic,
+      partition: payload.partition,
+      offset: payload.message.offset,
+      err: error.message,
+    });
+    recordMessageConsumed(
+      payload.topic, "UNKNOWN", "UNKNOWN", "UNKNOWN", false,
+      "poison_pill", performance.now() - startedAt,
+    );
+    await commitMessage(consumer, payload);
+  }
+}
+
 async function main(): Promise<void> {
   healthServer = await startHealthServer();
   await Promise.all([generalConsumer.connect(), criticalConsumer.connect()]);
@@ -239,11 +266,11 @@ async function main(): Promise<void> {
   await Promise.all([
     generalConsumer.run({
       autoCommit: false,
-      eachMessage: handleGeneralMessage,
+      eachMessage: (payload) => handleWithPoisonPillPolicy(generalConsumer, payload, handleGeneralMessage),
     }),
     criticalConsumer.run({
       autoCommit: false,
-      eachMessage: handleCriticalMessage,
+      eachMessage: (payload) => handleWithPoisonPillPolicy(criticalConsumer, payload, handleCriticalMessage),
     }),
   ]);
 }

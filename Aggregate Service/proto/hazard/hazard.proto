@@ -26,6 +26,7 @@ enum Source {
     PVMBG = 2;
     SATELIT = 3;
     SENSOR_PANTAI = 4;
+    TIM_LAPANGAN = 5;
 }
 enum HazardType {
     HAZARD_TYPE_UNSPECIFIED = 0;
@@ -70,8 +71,9 @@ message ListHazardsRequest {
 message ListHazardsResponse {
     repeated Hazard hazards = 1;
     int32 total = 2;
-
-    SensorPantaiStatus sensor_pantai_status = 3;
+    bool partial = 3;
+    repeated string unavailable_units = 4;
+    SensorPantaiStatus sensor_pantai_status = 5;
 }
 enum DataStatus {
     DATA_STATUS_UNSPECIFIED = 0;

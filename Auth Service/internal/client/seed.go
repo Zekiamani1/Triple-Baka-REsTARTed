@@ -9,8 +9,11 @@ import (
 )
 
 const (
-	ScopeReadSummary = "hazard:read:summary"
-	ScopeReadFull    = "hazard:read:full"
+	ScopeReadSummary      = "hazard:read:summary"
+	ScopeReadFull         = "hazard:read:full"
+	ScopeFieldReportWrite = "field_report:write"
+	ScopeDLQRead          = "dlq:read"
+	ScopeDLQReplay        = "dlq:replay"
 )
 
 type Client struct {

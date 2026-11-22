@@ -164,19 +164,38 @@ end
 local FULL_SCOPE = "hazard:read:full"
 local FILTERED_FIELD = { "sourceRefId", "latitude", "longitude", "attributes" }
 
+local function has_scope(scope_str, target)
+    if type(scope_str) ~= "string" then return false end
+    for token in scope_str:gmatch("%S+") do
+        if token == target then return true end
+    end
+    return false
+end
+
 local function strip(hazard)
     for _, field in ipairs(FILTERED_FIELD) do hazard[field] = nil end
     return hazard
 end
 
 function envoy_on_request(request_handle)
-    local path = request_handle:headers():get(":path") or ""
+    local headers = request_handle:headers()
+    local path = headers:get(":path") or ""
+    local corr = headers:get("x-correlation-id")
+    if not corr or corr == "" then
+        corr = string.format("%08x-%04x-%04x", os.time(), math.random(0, 65535), math.random(0, 65535))
+        headers:replace("x-correlation-id", corr)
+    end
     request_handle:streamInfo():dynamicMetadata():set("field_filter", "path", path)
+    request_handle:streamInfo():dynamicMetadata():set("field_filter", "correlation_id", corr)
 end
 
 function envoy_on_response(response_handle)
   local info = response_handle:streamInfo()
   local stash = info:dynamicMetadata():get("field_filter")
+  local corr = stash and stash["correlation_id"]
+  if corr and corr ~= "" then
+    response_handle:headers():replace("x-correlation-id", corr)
+  end
   local path = stash and stash["path"]
   response_handle:logInfo("field_filter: path=" .. tostring(path))
   if not path or not path:find("^/aggregate/hazards") then return end
@@ -184,7 +203,7 @@ function envoy_on_response(response_handle)
   local jwt = info:dynamicMetadata():get("envoy.filters.http.jwt_authn")
   local scope = jwt and jwt["jwt_payload"] and jwt["jwt_payload"]["scope"]
   response_handle:logInfo("field_filter: scope=" .. tostring(scope))
-  if scope == FULL_SCOPE then return end
+  if has_scope(scope, FULL_SCOPE) then return end
 
   local content_type = response_handle:headers():get("content-type") or ""
   response_handle:logInfo("field_filter: type=" .. tostring(content_type))

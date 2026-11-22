@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BNPB Hazard Analytics Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 20px; background: #0f172a; color: #e2e8f0; }
+    h1 { margin: 0 0 12px; font-size: 1.5rem; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
+    button, input { padding: 6px 12px; border-radius: 6px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; cursor: pointer; }
+    button.active { background: #2563eb; border-color: #3b82f6; }
+    .banner { padding: 12px 16px; border-radius: 8px; background: #7c2d12; border: 1px solid #ea580c; color: #fed7aa; margin-bottom: 16px; display: none; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 16px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #334155; }
+  </style>
+</head>
+<body>
+  <h1>Dashboard Analitik Kejadian Bencana BNPB</h1>
+  <div class="controls">
+    <button data-range="15m">15m</button>
+    <button data-range="1h" class="active">1h</button>
+    <button data-range="6h">6h</button>
+    <button data-range="24h">24h</button>
+    <button data-range="7d">7d</button>
+    <button data-range="all">All</button>
+    <input type="datetime-local" id="fromInput" />
+    <input type="datetime-local" id="toInput" />
+    <button id="applyCustom">Terapkan</button>
+    <span id="asOf" style="margin-left:auto;font-size:0.85rem;color:#94a3b8;"></span>
+  </div>
+  <div id="partialBanner" class="banner"></div>
+  <div class="grid">
+    <div class="card" style="grid-column: 1 / -1;">
+      <h3>Tren Kejadian per Jenis Bahaya</h3>
+      <canvas id="timeChart" height="90"></canvas>
+    </div>
+    <div class="card">
+      <h3>Distribusi Severity (Total: <span id="totalEvents">0</span>)</h3>
+      <canvas id="severityChart" height="160"></canvas>
+    </div>
+    <div class="card">
+      <h3>Kejadian per Wilayah</h3>
+      <table>
+        <thead><tr><th>Wilayah</th><th>Jumlah</th></tr></thead>
+        <tbody id="areaBody"></tbody>
+      </table>
+    </div>
+  </div>
+  <script>
+    let timeChart, severityChart;
+    let currentRange = "1h";
+
+    function rangeToParams(range) {
+      const now = new Date();
+      const map = { "15m": 15 * 60e3, "1h": 3600e3, "6h": 6 * 3600e3, "24h": 24 * 3600e3, "7d": 7 * 86400e3 };
+      if (range === "all") return "";
+      if (range === "custom") {
+        const f = document.getElementById("fromInput").value;
+        const t = document.getElementById("toInput").value;
+        const p = new URLSearchParams();
+        if (f) p.set("from", new Date(f).toISOString());
+        if (t) p.set("to", new Date(t).toISOString());
+        return p.toString() ? "?" + p.toString() : "";
+      }
+      const from = new Date(now.getTime() - (map[range] || 3600e3));
+      return `?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(now.toISOString())}`;
+    }
+
+    async function loadSummary() {
+      const qs = rangeToParams(currentRange);
+      const resp = await fetch(`/analytics/summary${qs}`);
+      const data = await resp.json();
+
+      document.getElementById("totalEvents").textContent = data.total_events ?? 0;
+      document.getElementById("asOf").textContent = `Diperbarui: ${data.as_of || ""}`;
+
+      const banner = document.getElementById("partialBanner");
+      if (data.partial) {
+        banner.style.display = "block";
+        banner.textContent = `PERINGATAN DATA PARSIAL: Sebagian unit penyimpanan tidak terjangkau (${(data.unavailable_units || []).join(", ")}). Angka yang ditampilkan belum lengkap.`;
+      } else {
+        banner.style.display = "none";
+      }
+
+      const labels = (data.time_series || []).map(r => r.bucket);
+      const types = ["SEISMIC", "TSUNAMI", "VOLCANIC", "WILDFIRE", "COASTAL"];
+      const colors = ["#38bdf8", "#818cf8", "#f97316", "#ef4444", "#14b8a6"];
+      const datasets = types.map((t, i) => ({
+        label: t,
+        data: (data.time_series || []).map(r => r[t] || 0),
+        borderColor: colors[i],
+        tension: 0.2,
+      }));
+
+      if (timeChart) timeChart.destroy();
+      timeChart = new Chart(document.getElementById("timeChart"), {
+        type: "line",
+        data: { labels, datasets },
+        options: { responsive: true, scales: { y: { beginAtZero: true } } },
+      });
+
+      const sevLabels = ["NORMAL", "WASPADA", "SIAGA", "AWAS"];
+      const sevValues = sevLabels.map(s => (data.by_severity && data.by_severity[s]) || 0);
+      if (severityChart) severityChart.destroy();
+      severityChart = new Chart(document.getElementById("severityChart"), {
+        type: "bar",
+        data: { labels: sevLabels, datasets: [{ label: "Jumlah", data: sevValues, backgroundColor: ["#22c55e", "#eab308", "#f97316", "#ef4444"] }] },
+      });
+
+      const tbody = document.getElementById("areaBody");
+      tbody.innerHTML = (data.by_area || []).slice(0, 20).map(a => `<tr><td>${a.area_name}</td><td>${a.count}</td></tr>`).join("");
+    }
+
+    document.querySelectorAll("button[data-range]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("button[data-range]").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        currentRange = btn.dataset.range;
+        loadSummary();
+      });
+    });
+    document.getElementById("applyCustom").addEventListener("click", () => {
+      currentRange = "custom";
+      loadSummary();
+    });
+    loadSummary();
+    setInterval(loadSummary, 15000);
+  </script>
+</body>
+</html>

@@ -32,6 +32,13 @@ spec:
     enabled: true
     configsvrReplSet:
       size: 3
+      labels:
+        role: store
+      resources:
+        requests:
+          memory: "512Mi"
+        limits:
+          memory: "1Gi"
       configuration: |
         storage:
           wiredTiger:
@@ -45,7 +52,13 @@ spec:
         timeoutSeconds: 15
         failureThreshold: 10
       affinity:
-        antiAffinityTopologyKey: "none"
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: configsvr
       expose:
         enabled: false
         type: ClusterIP
@@ -56,6 +69,13 @@ spec:
               storage: 1Gi
     mongos:
       size: 4
+      labels:
+        role: store
+      resources:
+        requests:
+          memory: "512Mi"
+        limits:
+          memory: "1Gi"
       livenessProbe:
         timeoutSeconds: 15
         failureThreshold: 10
@@ -64,12 +84,25 @@ spec:
         timeoutSeconds: 15
         failureThreshold: 10
       affinity:
-        antiAffinityTopologyKey: "none"
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: mongos
       expose:
         type: ClusterIP
   replsets:
     - name: shard1
       size: 3
+      labels:
+        role: store
+      resources:
+        requests:
+          memory: "512Mi"
+        limits:
+          memory: "1Gi"
       configuration: |
         storage:
           wiredTiger:
@@ -83,7 +116,13 @@ spec:
         timeoutSeconds: 15
         failureThreshold: 10
       affinity:
-        antiAffinityTopologyKey: "none"
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/replset: shard1
       expose:
         enabled: false
         type: ClusterIP
@@ -94,6 +133,13 @@ spec:
               storage: 1Gi
     - name: shard2
       size: 3
+      labels:
+        role: store
+      resources:
+        requests:
+          memory: "512Mi"
+        limits:
+          memory: "1Gi"
       configuration: |
         storage:
           wiredTiger:
@@ -107,7 +153,13 @@ spec:
         timeoutSeconds: 15
         failureThreshold: 10
       affinity:
-        antiAffinityTopologyKey: "none"
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/replset: shard2
       expose:
         enabled: false
         type: ClusterIP
@@ -129,12 +181,18 @@ spec:
     metadata:
       labels:
         app: mongo-cluster-init
+        role: other
     spec:
       restartPolicy: OnFailure
       containers:
         - name: mongo-cluster-init
           image: percona/percona-server-mongodb:8.0.4-1-multi
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           envFrom:
             - configMapRef:
                 name: aggregate-env
@@ -177,19 +235,25 @@ spec:
                 const [firstShard, secondShard] = configDb.shards.find().sort({ _id: 1 }).toArray().map(s => s._id);
                 if (!firstShard || !secondShard)
                   throw new Error("Expected at least 2 shards to distribute initial hash ranges");
-                const boundary = { partition_key: "8", source: MinKey(), source_ref_id: MinKey() };
                 const chunks = configDb.chunks;
-                if (!chunks.findOne({ uuid: metadata.uuid, "min.partition_key": "8" }))
-                  command(admin.runCommand({ split: namespace, middle: boundary }));
-                const lower = chunks.find({ uuid: metadata.uuid }).sort({ min: 1 }).limit(1).next();
-                if (lower.shard !== firstShard)
-                  command(admin.runCommand({ moveChunk: namespace, find: { partition_key: "0", source: "", source_ref_id: "" }, to: firstShard }));
-                const upper = chunks.findOne({ uuid: metadata.uuid, "min.partition_key": "8" });
-                if (upper.shard !== secondShard)
-                  command(admin.runCommand({ moveChunk: namespace, find: { partition_key: "9", source: "", source_ref_id: "" }, to: secondShard }));
+                const boundaries = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"];
+                for (const b of boundaries) {
+                  if (!chunks.findOne({ uuid: metadata.uuid, "min.partition_key": b }))
+                    command(admin.runCommand({ split: namespace, middle: { partition_key: b, source: MinKey(), source_ref_id: MinKey() } }));
+                }
+                const allChunks = chunks.find({ uuid: metadata.uuid }).sort({ min: 1 }).toArray();
+                for (let i = 0; i < allChunks.length; i++) {
+                  const targetShard = i < allChunks.length / 2 ? firstShard : secondShard;
+                  if (allChunks[i].shard !== targetShard)
+                    command(admin.runCommand({ moveChunk: namespace, find: allChunks[i].min, to: targetShard }));
+                }
                 setup.updateOne({ _id: namespace }, { $set: { rangesReady: true } }, { upsert: true });
               }
               events.createIndex({ hazard_id: 1 });
+              events.createIndex({ ingested_at: 1, hazard_id: 1 });
+              events.createIndex({ hazard_type: 1, occurred_at: -1 });
+              events.createIndex({ severity: 1, occurred_at: -1 });
+              events.createIndex({ area_name: 1 });
               events.createIndex({ ingested_at: -1, source: 1, source_ref_id: 1 });
               print(`${namespace}: sharded with unique event identity; initial hash ranges distributed`);
               '
@@ -210,11 +274,17 @@ spec:
     metadata:
       labels:
         app: auth-db
+        role: store
     spec:
       containers:
         - name: auth-db
           image: postgres:16-alpine
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "512Mi"
+            limits:
+              memory: "1Gi"
           ports:
             - containerPort: 5432
               name: postgres

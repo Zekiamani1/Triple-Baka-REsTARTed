@@ -23,10 +23,20 @@ import {
   connectKafka,
   disconnectKafka,
   isKafkaReady,
+  publishFieldReport,
   publishHazard,
   runIngestConsumer,
   stopIngestConsumer,
 } from "./kafkabridge";
+import {
+  ensureUnprocessedIndexes,
+  parkUnprocessedMessage,
+  startInternalHttpServer,
+  type UnprocessedMessageDoc,
+} from "./dlqAndFieldReports";
+import { queryWithPartialFallback } from "./partialQuery";
+import type { Collection } from "mongodb";
+import type { Server as HttpServer } from "node:http";
 
 const packageDefinition = protoLoader.loadSync(path.resolve("proto/hazard/hazard.proto"), {
   keepCase: true,
@@ -59,6 +69,8 @@ const mongoClient = new MongoClient(mongo.uri, {
 });
 
 let collection: any;
+let unprocessedCol: Collection<UnprocessedMessageDoc>;
+let internalHttpServer: HttpServer | null = null;
 const server = new grpc.Server();
 let ready = false;
 let stopping = false;
@@ -153,7 +165,7 @@ async function trackMongoOp<T = any>(operation: string, fn: () => Promise<T>): P
     }
 }
 
-async function ingestHazard(hazardEvent: any): Promise<void> {
+async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean }): Promise<void> {
     const start = performance.now();
     const source = String(hazardEvent?.source ?? "UNKNOWN");
     const hazardType = String(hazardEvent?.hazard_type ?? "UNKNOWN");
@@ -220,7 +232,7 @@ async function ingestHazard(hazardEvent: any): Promise<void> {
                     const existingEvent = await trackMongoOp("findOne", () =>
                         collection.findOne(identity),
                     );
-                    if (existingEvent?.published) {
+                    if (existingEvent?.published && !opts?.upsert) {
                         logInfo("duplicate hazard event ignored", {
                             source: hazardEvent.source,
                             source_ref_id: hazardEvent.source_ref_id,
@@ -235,7 +247,25 @@ async function ingestHazard(hazardEvent: any): Promise<void> {
                         throw error;
                     }
 
-                    eventToPublish = withoutDeliveryState(existingEvent);
+                    if (opts?.upsert) {
+                        const preservedId = existingEvent.hazard_id ?? hazardEvent.hazard_id;
+                        await trackMongoOp("updateOne", () =>
+                            collection.updateOne(identity, {
+                                $set: {
+                                    severity: hazardEvent.severity,
+                                    area_name: hazardEvent.area_name,
+                                    latitude: hazardEvent.latitude,
+                                    longitude: hazardEvent.longitude,
+                                    occurred_at: hazardEvent.occurred_at,
+                                    ingested_at: hazardEvent.ingested_at,
+                                    attributes: hazardEvent.attributes,
+                                },
+                            }),
+                        );
+                        eventToPublish = { ...hazardEvent, hazard_id: preservedId };
+                    } else {
+                        eventToPublish = withoutDeliveryState(existingEvent);
+                    }
                 }
 
                 await publishHazard(eventToPublish);
@@ -322,36 +352,61 @@ async function aggregateEvent(call: grpc.ServerUnaryCall<any, any>, callback: gr
 
 const LIST_CACHE_TTL_MS = 2000;
 const LIST_CACHE_MAX_ENTRIES = 500;
-const listHazardsCache = new Map<string, { expiresAt: number; payload: { hazards: any[]; total: number } }>();
-const listHazardsInFlight = new Map<string, Promise<{ hazards: any[]; total: number }>>();
+const listHazardsCache = new Map<string, { expiresAt: number; payload: { hazards: any[]; total: number; partial: boolean; unavailable_units: string[] } }>();
+const listHazardsInFlight = new Map<string, Promise<{ hazards: any[]; total: number; partial: boolean; unavailable_units: string[] }>>();
 
 async function fetchListHazardsPayload(
     filter: Record<string, unknown>,
     limit: number,
     offset: number,
     span: any,
-): Promise<{ hazards: any[]; total: number }> {
+): Promise<{ hazards: any[]; total: number; partial: boolean; unavailable_units: string[] }> {
     const isUnfiltered = Object.keys(filter).length === 0;
-    const [hazards, total] = await Promise.all([
-        trackMongoOp("find", () =>
-            collection.find(filter, {
-                projection: { _id: 0, partition_key: 0, published: 0, published_at: 0 }
-            })
-            .sort({ ingested_at: -1, source: 1, source_ref_id: 1 })
-            .skip(offset)
-            .limit(limit)
-            .toArray()
-        ),
-        trackMongoOp(isUnfiltered ? "estimatedDocumentCount" : "countDocuments", () =>
-            isUnfiltered
-                ? collection.estimatedDocumentCount()
-                : collection.countDocuments(filter)
-        ),
-    ]);
+    const partialRes = await queryWithPartialFallback(
+        mongoClient,
+        mongo.dbName,
+        mongo.collection,
+        async (col, opts) => {
+            const [hazards, total] = await Promise.all([
+                trackMongoOp("find", () =>
+                    col
+                        .find(filter, { allowPartialResults: opts.allowPartialResults, maxTimeMS: opts.maxTimeMS })
+                        .project({
+                            _id: 0,
+                            hazard_id: 1,
+                            source: 1,
+                            source_ref_id: 1,
+                            hazard_type: 1,
+                            severity: 1,
+                            area_name: 1,
+                            latitude: 1,
+                            longitude: 1,
+                            occurred_at: 1,
+                            ingested_at: 1,
+                            attributes: 1,
+                        })
+                        .sort({ ingested_at: -1, source: 1, source_ref_id: 1 })
+                        .skip(offset)
+                        .limit(limit)
+                        .toArray()
+                ),
+                trackMongoOp(isUnfiltered ? "estimatedDocumentCount" : "countDocuments", () =>
+                    isUnfiltered
+                        ? col.estimatedDocumentCount({ maxTimeMS: opts.maxTimeMS })
+                        : col.countDocuments(filter, { maxTimeMS: opts.maxTimeMS })
+                ),
+            ]);
+            return { hazards, total };
+        },
+    );
+
+    const hazards = partialRes.data?.hazards ?? [];
+    const total = partialRes.data?.total ?? 0;
 
     span.setAttributes({
         "query.result_count": hazards.length,
         "query.total_count": total,
+        "query.partial": partialRes.partial,
     });
 
     return {
@@ -362,6 +417,8 @@ async function fetchListHazardsPayload(
             attributes: toStruct(plainAttributes(h.attributes)),
         })),
         total,
+        partial: partialRes.partial,
+        unavailable_units: partialRes.unavailable_units,
     };
 }
 
@@ -408,7 +465,7 @@ async function listHazards(call: grpc.ServerUnaryCall<any, any>, callback: grpc.
                 const cacheKey = `${filter.source ?? ""}|${filter.hazard_type ?? ""}|${filter.severity ?? ""}|${limit}|${offset}`;
                 const now = Date.now();
                 const cached = listHazardsCache.get(cacheKey);
-                let payload: { hazards: any[]; total: number };
+                let payload: { hazards: any[]; total: number; partial: boolean; unavailable_units: string[] };
 
                 if (cached && cached.expiresAt > now) {
                     span.setAttribute("query.cache_hit", true);
@@ -546,9 +603,66 @@ async function main () {
     collection = db.collection(mongo.collection);
     await collection.createIndex({ partition_key: 1, source: 1, source_ref_id: 1 }, { unique: true });
     await collection.createIndex({ hazard_id: 1 });
+    unprocessedCol = await ensureUnprocessedIndexes(db);
 
     await connectKafka();
-    void runIngestConsumer(ingestHazard).catch((error) => {
+    internalHttpServer = startInternalHttpServer({
+        mongoClient,
+        dbName: mongo.dbName,
+        collectionName: mongo.collection,
+        unprocessedCol,
+        ingestHazard,
+        publishFieldReport,
+    });
+    void runIngestConsumer({
+        onHazard: (hazard) => ingestHazard(hazard),
+        onDlqMessage: async (dlq) => {
+            await parkUnprocessedMessage(unprocessedCol, {
+                message_id: typeof dlq.message_id === "string" ? dlq.message_id : undefined,
+                source: String(dlq.source ?? "UNKNOWN"),
+                source_ref_id: String(dlq.source_ref_id ?? ""),
+                raw_payload: String(dlq.raw_payload ?? JSON.stringify(dlq)),
+                raw_encoding: dlq.raw_encoding === "base64" ? "base64" : "utf8",
+                received_at: typeof dlq.received_at === "string" ? dlq.received_at : undefined,
+                reason: String(dlq.reason ?? "dlq_parked"),
+                retryable: Boolean(dlq.retryable),
+                attempts: Number(dlq.attempts ?? 1) || 1,
+                status: dlq.retryable ? "retrying" : "parked",
+                seq: Number(dlq.seq ?? 0) || 0,
+            });
+        },
+        onPoisonPill: async (info) => {
+            await parkUnprocessedMessage(unprocessedCol, {
+                source: info.source,
+                raw_payload: info.rawPayload,
+                raw_encoding: info.rawEncoding,
+                reason: info.reason,
+                retryable: false,
+                status: "parked",
+            });
+        },
+        onRetryableFailure: async (info) => {
+            const doc = await parkUnprocessedMessage(unprocessedCol, {
+                message_id: info.messageId,
+                source: info.source,
+                source_ref_id: info.sourceRefId,
+                raw_payload: info.rawPayload,
+                raw_encoding: "utf8",
+                reason: info.reason,
+                retryable: !info.exhausted,
+                attempts: info.attempts,
+                status: info.exhausted ? "parked" : "retrying",
+            });
+            return doc.message_id;
+        },
+        onRetryRecovered: async (messageId) => {
+            const now = new Date();
+            await unprocessedCol.updateOne(
+                { message_id: messageId },
+                { $set: { status: "recovered", recovered_at: now, updated_at: now } },
+            );
+        },
+    }).catch((error) => {
         logError("Kafka ingestion consumer failed", {
             err: error instanceof Error ? error.message : String(error),
         });
@@ -638,6 +752,10 @@ async function shutdown(exitCode = 0) {
       stopIngestConsumer(),
       new Promise<void>((resolve, reject) => {
         server.tryShutdown(error => error ? reject(error) : resolve());
+      }),
+      new Promise<void>((resolve) => {
+        if (!internalHttpServer) return resolve();
+        internalHttpServer.close(() => resolve());
       }),
     ]);
     await disconnectKafka();
