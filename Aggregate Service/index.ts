@@ -16,7 +16,7 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import path from "path";
 import { MongoClient } from "mongodb";
-import { kafka, mongo, service } from "./config";
+import { kafka, mongo, sensorPantai, service } from "./config";
 import {
   connectKafka,
   disconnectKafka,
@@ -53,6 +53,45 @@ let collection: any;
 
 const hazardPackage = proto.hazard;
 const healthPackage = healthProto.grpc.health.v1;
+
+const unavailableSensorPantaiStatus = { data_status: "DATA_STATUS_UNAVAILABLE" };
+let sensorPantaiStatusCache: any = unavailableSensorPantaiStatus;
+let sensorPantaiStatusRefresh: NodeJS.Timeout | undefined;
+
+async function refreshSensorPantaiStatus(): Promise<void> {
+    if (!sensorPantai.statusUrl || !Number.isFinite(sensorPantai.statusTimeoutMs) || sensorPantai.statusTimeoutMs <= 0) {
+        sensorPantaiStatusCache = unavailableSensorPantaiStatus;
+        return;
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), sensorPantai.statusTimeoutMs);
+    try {
+        const response = await fetch(sensorPantai.statusUrl, {
+            signal: controller.signal,
+            headers: { accept: "application/json" },
+            // Internal adapter status only; never follow redirects outside the configured service.
+            redirect: "error",
+        });
+        if (!response.ok) {
+            sensorPantaiStatusCache = unavailableSensorPantaiStatus;
+            return;
+        }
+        const status = await response.json() as any;
+        const dataStatus = String(status.data_status ?? "").toLowerCase();
+        const enumValue = dataStatus === "fresh" ? "DATA_STATUS_FRESH"
+            : dataStatus === "stale" ? "DATA_STATUS_STALE"
+            : "DATA_STATUS_UNAVAILABLE";
+        sensorPantaiStatusCache = {
+            data_status: enumValue,
+            ...(status.last_success_at ? { last_success_at: toProtoTimestamp(toDate(status.last_success_at)) } : {}),
+            ...(status.last_data_at ? { latest_observed_at: toProtoTimestamp(toDate(status.last_data_at)) } : {}),
+        };
+    } catch {
+        sensorPantaiStatusCache = unavailableSensorPantaiStatus;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
 
 function protoToHazard(protoHazard: any) {
     return {
@@ -318,6 +357,7 @@ async function listHazards(call: grpc.ServerUnaryCall<any, any>, callback: grpc.
                         attributes: toStruct(plainAttributes(h.attributes)),
                     })),
                     total,
+                    sensor_pantai_status: sensorPantaiStatusCache,
                 });
             } catch (error: any) {
                 const durationMs = performance.now() - start;
@@ -414,6 +454,9 @@ async function getHazard(call: grpc.ServerUnaryCall<any, any>, callback: grpc.se
 async function main () {
     await mongoClient.connect();
 
+    void refreshSensorPantaiStatus();
+    sensorPantaiStatusRefresh = setInterval(() => void refreshSensorPantaiStatus(), 2_000);
+
     const db = mongoClient.db(mongo.dbName);
     collection = db.collection(mongo.collection);
     await collection.createIndex({ source: 1, source_ref_id: 1 }, { unique: true });
@@ -462,6 +505,7 @@ async function main () {
 }
 
 async function shutdown() {
+  if (sensorPantaiStatusRefresh) clearInterval(sensorPantaiStatusRefresh);
   await disconnectKafka();
   await mongoClient.close();
   await shutdownTelemetry();

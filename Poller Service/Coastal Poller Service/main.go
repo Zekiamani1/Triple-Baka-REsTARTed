@@ -23,6 +23,7 @@ const (
 	validationMaxAgeEnv     = "MAX_OBSERVATION_AGE_MS"
 	validationFutureEnv     = "MAX_FUTURE_SKEW_MS"
 	stateOperationTimeout   = 5 * time.Second
+	sourceStatusTimeout     = 200 * time.Millisecond
 	shutdownWaitTimeout     = 15 * time.Second
 	retryableBatchLimit     = 100
 	retryCycleTimeout       = 5 * time.Second
@@ -155,7 +156,7 @@ func run() error {
 
 	var ready atomic.Bool
 	ready.Store(true) // The adapter can recover an unavailable upstream after startup.
-	healthServer := newHealthServer(config.HealthPort, &ready, sensor)
+	healthServer := newHealthServer(config.HealthPort, &ready, sensor, state, policy.MaxObservationAge)
 	healthErrors := make(chan error, 1)
 	go func() {
 		logger.Info("health server listening", "port", config.HealthPort)
@@ -872,10 +873,24 @@ func loadValidationPolicyFromEnv() (ValidationPolicy, error) {
 	return policy, nil
 }
 
-func newHealthServer(port int, ready *atomic.Bool, sensor *SensorClient) *http.Server {
+func newHealthServer(port int, ready *atomic.Bool, sensor *SensorClient, state *StateStore, maxDataAge time.Duration) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeHealthJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+	})
+	mux.HandleFunc("GET /internal/source-status", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), sourceStatusTimeout)
+		defer cancel()
+		if err := state.RefreshDataStatus(ctx, time.Now().UTC(), maxDataAge); err != nil {
+			writeHealthJSON(w, http.StatusServiceUnavailable, map[string]any{"data_status": "unavailable"})
+			return
+		}
+		status, err := state.LoadSourceStatus(ctx)
+		if err != nil {
+			writeHealthJSON(w, http.StatusServiceUnavailable, map[string]any{"data_status": "unavailable"})
+			return
+		}
+		writeHealthJSON(w, http.StatusOK, status)
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		if ready == nil || !ready.Load() {

@@ -22,6 +22,11 @@ export const mongo = {
   dbName: required('MONGO_DB_NAME', 'bnpb'),
   collection: required('MONGO_COLLECTION', 'hazard_events'),
 };
+
+export const sensorPantai = {
+  statusUrl: process.env.SENSOR_PANTAI_STATUS_URL?.trim() || undefined,
+  statusTimeoutMs: parseInt(process.env.SENSOR_PANTAI_STATUS_TIMEOUT_MS ?? '250', 10),
+};
  
 export const service = {
   port: parseInt(required('AGGREGATOR_PORT', '50051'), 10),
