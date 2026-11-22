@@ -51,7 +51,9 @@ func (this *PostgresRepo) UpsertClient(cont context.Context, cli Client) error {
 	if createdAt.IsZero() {
 		createdAt = time.Now().UTC()
 	}
-	_, err := this.db.ExecContext(cont, query, cli.ClientID, cli.Secret, cli.Scope, cli.DisplayName, createdAt)
+	queryCtx, cancel := context.WithTimeout(cont, 2*time.Second)
+	defer cancel()
+	_, err := this.db.ExecContext(queryCtx, query, cli.ClientID, cli.Secret, cli.Scope, cli.DisplayName, createdAt)
 	durationMs := float64(time.Since(start).Nanoseconds()) / 1e6
 	telemetry.RecordDBQuery(cont, "UpsertClient", durationMs)
 	if err != nil {
@@ -79,7 +81,9 @@ func (this *PostgresRepo) GetByID(cont context.Context, ID string) (*Client, err
 		WHERE client_id = $1
 	`
 	var client Client
-	err := this.db.QueryRowContext(cont, query, ID).Scan(
+	queryCtx, cancel := context.WithTimeout(cont, 2*time.Second)
+	defer cancel()
+	err := this.db.QueryRowContext(queryCtx, query, ID).Scan(
 		&client.ClientID, &client.Secret, &client.Scope, &client.DisplayName, &client.CreatedAt,
 	)
 	durationMs := float64(time.Since(start).Nanoseconds()) / 1e6

@@ -24,6 +24,31 @@ import type { IHeaders } from "kafkajs";
 
 export const SCOPE_NAME = process.env.OTEL_SERVICE_NAME ?? "event-consumer";
 
+type Instruments = {
+  messagesConsumedCounter: ReturnType<ReturnType<typeof metrics.getMeter>["createCounter"]>;
+  processingDurationHist: ReturnType<ReturnType<typeof metrics.getMeter>["createHistogram"]>;
+};
+
+let cachedInstruments: Instruments | null = null;
+
+function initInstruments(): Instruments {
+  const m = metrics.getMeter(SCOPE_NAME);
+  cachedInstruments = {
+    messagesConsumedCounter: m.createCounter("event_consumer.messages.consumed_total", {
+      description: "Total number of hazard events consumed by Event Consumer",
+    }),
+    processingDurationHist: m.createHistogram("event_consumer.messages.processing_duration_ms", {
+      description: "Duration of processing a Kafka hazard event in milliseconds",
+      unit: "ms",
+    }),
+  };
+  return cachedInstruments;
+}
+
+function getInstruments(): Instruments {
+  return cachedInstruments ?? initInstruments();
+}
+
 export function initTelemetry(): () => Promise<void> {
   if (process.env.OTEL_SDK_DISABLED === "true") {
     return async () => {};
@@ -46,6 +71,7 @@ export function initTelemetry(): () => Promise<void> {
   });
 
   sdk.start();
+  initInstruments();
 
   return async () => {
     await sdk.shutdown().catch((err) => {
@@ -106,14 +132,9 @@ export function recordMessageConsumed(
   status: string,
   durationMs: number,
 ): void {
-  const m = metrics.getMeter(SCOPE_NAME);
-  m.createCounter("event_consumer.messages.consumed_total", {
-    description: "Total number of hazard events consumed by Event Consumer",
-  }).add(1, { topic, source, hazard_type: hazardType, severity, status });
-  m.createHistogram("event_consumer.messages.processing_duration_ms", {
-    description: "Duration of processing a Kafka hazard event in milliseconds",
-    unit: "ms",
-  }).record(durationMs, { topic, status });
+  const inst = getInstruments();
+  inst.messagesConsumedCounter.add(1, { topic, source, hazard_type: hazardType, severity, status });
+  inst.processingDurationHist.record(durationMs, { topic, status });
 }
 
 export function extractContextFromKafkaHeaders(headers?: IHeaders): Context {

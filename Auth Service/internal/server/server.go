@@ -151,7 +151,7 @@ func (this *Server) issuePair(ctx context.Context, cli *client.Client, grantType
 	}
 
 	telemetry.RecordTokenIssued(ctx, grantType, cli.ClientID, cli.Scope)
-	slog.InfoContext(ctx, "token pair issued", "client_id", cli.ClientID, "scope", cli.Scope, "grant_type", grantType)
+	slog.DebugContext(ctx, "token pair issued", "client_id", cli.ClientID, "scope", cli.Scope, "grant_type", grantType)
 	return &authv1.TokenResponse{AccessToken: accToken, RefreshToken: refreshToken, ExpiresIn: int64(this.deps.AccessTokenTTL.Seconds())}, nil
 }
 
@@ -176,6 +176,9 @@ func ConnectDBWithRetry(ctx context.Context, dsn string, attempts int, delay tim
 	if err != nil {
 		return nil, fmt.Errorf("db: open: %w", err)
 	}
+	conn.SetMaxOpenConns(25)
+	conn.SetMaxIdleConns(25)
+	conn.SetConnMaxLifetime(5 * time.Minute)
 
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {

@@ -1,17 +1,6 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: auth-keys
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 64Mi
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
   name: bmkg-data
 spec:
   accessModes:
@@ -40,7 +29,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 2Gi
+      storage: 10Gi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

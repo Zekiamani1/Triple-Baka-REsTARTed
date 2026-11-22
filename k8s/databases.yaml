@@ -36,9 +36,11 @@ spec:
         role: store
       resources:
         requests:
-          memory: "512Mi"
+          cpu: "100m"
+          memory: "256Mi"
         limits:
-          memory: "1Gi"
+          cpu: "500m"
+          memory: "512Mi"
       configuration: |
         storage:
           wiredTiger:
@@ -73,9 +75,11 @@ spec:
         role: store
       resources:
         requests:
-          memory: "512Mi"
+          cpu: "250m"
+          memory: "256Mi"
         limits:
-          memory: "1Gi"
+          cpu: "1000m"
+          memory: "512Mi"
       livenessProbe:
         timeoutSeconds: 15
         failureThreshold: 10
@@ -100,8 +104,10 @@ spec:
         role: store
       resources:
         requests:
-          memory: "512Mi"
+          cpu: "250m"
+          memory: "384Mi"
         limits:
+          cpu: "1500m"
           memory: "1Gi"
       configuration: |
         storage:
@@ -137,8 +143,10 @@ spec:
         role: store
       resources:
         requests:
-          memory: "512Mi"
+          cpu: "250m"
+          memory: "384Mi"
         limits:
+          cpu: "1500m"
           memory: "1Gi"
       configuration: |
         storage:
@@ -280,11 +288,6 @@ spec:
         - name: auth-db
           image: postgres:16-alpine
           imagePullPolicy: IfNotPresent
-          resources:
-            requests:
-              memory: "512Mi"
-            limits:
-              memory: "1Gi"
           ports:
             - containerPort: 5432
               name: postgres
@@ -294,6 +297,13 @@ spec:
           env:
             - name: PGDATA
               value: "/var/lib/postgresql/data/pgdata"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
           volumeMounts:
             - name: auth-db-data
               mountPath: /var/lib/postgresql/data

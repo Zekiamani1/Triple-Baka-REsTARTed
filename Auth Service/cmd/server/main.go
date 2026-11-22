@@ -52,6 +52,33 @@ func runKeygen() error {
 	return nil
 }
 
+func runKeygenSecret() error {
+	secretName := os.Getenv("AUTH_KEYS_SECRET_NAME")
+	if secretName == "" {
+		secretName = "auth-keys"
+	}
+	keyName := os.Getenv("AUTH_KEYS_SECRET_KEY")
+	if keyName == "" {
+		keyName = "private.pem"
+	}
+	cfg, err := keys.LoadInClusterSecretConfig(secretName, keyName)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	created, err := keys.EnsureK8sSecret(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if created {
+		slog.Info("keygen-secret: created new signing key secret", "secret", secretName, "key", keyName)
+	} else {
+		slog.Info("keygen-secret: signing key secret already present, leaving it alone", "secret", secretName)
+	}
+	return nil
+}
+
 func main() {
 	switch {
 	case len(os.Args) == 1:
@@ -64,8 +91,13 @@ func main() {
 			slog.Error("keygen failed", "err", err)
 			os.Exit(1)
 		}
+	case os.Args[1] == "keygen-secret":
+		if err := runKeygenSecret(); err != nil {
+			slog.Error("keygen-secret failed", "err", err)
+			os.Exit(1)
+		}
 	default:
-		slog.Error("unknown command", "command", os.Args[1], "usage", "auth-service [keygen]")
+		slog.Error("unknown command", "command", os.Args[1], "usage", "auth-service [keygen|keygen-secret]")
 		os.Exit(2)
 	}
 }
@@ -170,6 +202,7 @@ func run() error {
 	healthServer := health.NewServer()
 	healthv1.RegisterHealthServer(grpcServer, healthServer)
 	healthServer.SetServingStatus("", healthv1.HealthCheckResponse_SERVING)
+	healthServer.SetServingStatus("auth.v1.AuthService", healthv1.HealthCheckResponse_SERVING)
 
 	if config.EnableReflection {
 		reflection.Register(grpcServer)

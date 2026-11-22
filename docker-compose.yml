@@ -127,6 +127,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1536M
     volumes:
       - kafka-data:/var/lib/kafka/data
   kafka-init:
@@ -167,11 +172,17 @@ services:
       - "50052"
     deploy:
       replicas: 3
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 768M
     init: true
     stop_grace_period: 40s
     env_file: "./Aggregate Service/.env"
     environment:
-      MONGO_URI: mongodb://mongo-router:27017
+      AGGREGATE_MODE: all
+      NODE_OPTIONS: "--max-old-space-size=512"
+      MONGO_URI: mongodb://mongo-router:27017/?readPreference=secondaryPreferred
       AGGREGATOR_PORT: "50051"
       KAFKA_CONSUMER_GROUP: aggregate-ingestion
       MONGO_DB_NAME: ${MONGO_DB_NAME:-bnpb}
@@ -235,6 +246,11 @@ services:
     ports:
       - "8081:8081"
     env_file: "./External System/BMKG/.env"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
     volumes:
       - bmkg-data:/data
     healthcheck:
@@ -249,6 +265,11 @@ services:
     ports:
       - "8082:8082"
     env_file: "./External System/PVMBG/.env"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
     volumes:
       - pvmbg-data:/data
     healthcheck:
@@ -261,6 +282,11 @@ services:
       context: "./Poller Service/BMKG Poller Service"
       network: host
     env_file: "./Poller Service/BMKG Poller Service/.env"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
     depends_on:
       bmkg:
         condition: service_healthy
@@ -277,6 +303,11 @@ services:
       context: "./Poller Service/PVMBG Poller Service"
       network: host
     env_file: "./Poller Service/PVMBG Poller Service/.env"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
     depends_on:
       pvmbg:
         condition: service_healthy
@@ -294,6 +325,11 @@ services:
     env_file:
       - path: "./Poller Service/Satellite Poller Service/.env"
         required: false
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
     depends_on:
       kafka-init-ingest:
         condition: service_completed_successfully
@@ -310,6 +346,11 @@ services:
       context: "./Event Consumer"
       network: host
     env_file: "./Event Consumer/.env"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 384M
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -324,6 +365,11 @@ services:
       context: "./Alert Consumer"
       network: host
     env_file: "./Alert Consumer/.env"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 384M
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -339,6 +385,11 @@ services:
       POSTGRES_USER: auth_user
       POSTGRES_PASSWORD: auth_pass
       POSTGRES_DB: auth
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
     volumes:
       - auth-db-data:/var/lib/postgresql/data
       - ./Auth Service/migrations:/docker-entrypoint-initdb.d:ro
@@ -373,8 +424,13 @@ services:
       context: ./Auth Service
       network: host
     image: auth-service:dev
-    container_name: auth-service
     env_file: ./Auth Service/.env
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 512M
     depends_on:
       auth-db:
         condition: service_healthy
@@ -382,8 +438,8 @@ services:
         condition: service_completed_successfully
       auth-keygen:
         condition: service_completed_successfully
-    ports:
-      - "8083:8083"       # gRPC — clients call IssueToken/RefreshToken directly here
+    expose:
+      - "8083"       # gRPC — scaled replicas reached via Envoy STRICT_DNS
     volumes:
       - auth-keys:/app/keys:ro
     healthcheck:
@@ -394,15 +450,23 @@ services:
   gateway:
     image: envoyproxy/envoy:v1.31-latest
     container_name: api-gateway
+    command: ["-c", "/etc/envoy/envoy.yaml", "--concurrency", "2"]
     ports:
-      - "8080:8080"   # REST, client-facing
-      - "9901:9901"   # admin/debug UI
+      - "8080:8080"             # REST, client-facing
+      - "127.0.0.1:9901:9901"   # admin/debug UI (loopback only)
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 768M
     volumes:
       - ./API Gateway/envoy.yaml:/etc/envoy/envoy.yaml:ro
       - ./API Gateway/descriptors:/etc/envoy/descriptors:ro
       - ./API Gateway/lua:/etc/envoy/lua:ro
     depends_on:
       auth-service:
+        condition: service_healthy
+      aggregate:
         condition: service_healthy
   analytics-dashboard:
     build:
@@ -413,6 +477,27 @@ services:
     depends_on:
       gateway:
         condition: service_started
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    ports:
+      - "3000:3000"
+    expose:
+      - "4317"
+      - "4318"
+    volumes:
+      - lgtm-data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/api/health >/dev/null 2>&1 || curl -sf http://127.0.0.1:3000/api/health >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
 volumes:
   mongo-config-data:
   mongo-shard-1-data:
@@ -424,6 +509,7 @@ volumes:
   pvmbg-data:
   auth-db-data:
   auth-keys:
+  lgtm-data:
   mongo-shard-1-replica-2-data:
   mongo-shard-1-replica-3-data:
   mongo-shard-2-replica-2-data:
