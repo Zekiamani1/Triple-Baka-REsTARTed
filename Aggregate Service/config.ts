@@ -18,7 +18,7 @@ export const kafka = {
 };
  
 export const mongo = {
-  uri: required('MONGO_URI', 'mongodb://localhost:27017'),
+  uri: required('MONGO_URI', 'mongodb://localhost:27020'),
   dbName: required('MONGO_DB_NAME', 'bnpb'),
   collection: required('MONGO_COLLECTION', 'hazard_events'),
 };

@@ -105,6 +105,11 @@ static_resources:
                                   exact: "media"
                           route:
                             cluster: aggregator_service
+                            timeout: 30s
+                            retry_policy:
+                              retry_on: connect-failure,refused-stream,unavailable,reset,5xx
+                              num_retries: 1
+                              per_try_timeout: 10s
                           typed_per_filter_config:
                             envoy.filters.http.jwt_authn:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
@@ -142,6 +147,11 @@ static_resources:
                                   exact: "lapangan"
                           route:
                             cluster: aggregator_service
+                            timeout: 30s
+                            retry_policy:
+                              retry_on: connect-failure,refused-stream,unavailable,reset,5xx
+                              num_retries: 1
+                              per_try_timeout: 10s
                           typed_per_filter_config:
                             envoy.filters.http.jwt_authn:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
@@ -177,6 +187,11 @@ static_resources:
                             prefix: "/aggregate/"
                           route:
                             cluster: aggregator_service
+                            timeout: 30s
+                            retry_policy:
+                              retry_on: connect-failure,refused-stream,unavailable,reset,5xx
+                              num_retries: 1
+                              per_try_timeout: 10s
                           typed_per_filter_config:
                             envoy.filters.http.jwt_authn:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
@@ -299,6 +314,23 @@ static_resources:
     - name: aggregator_service
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+      connect_timeout: 5s
+      dns_lookup_family: V4_ONLY
+      dns_refresh_rate: 2s
+      circuit_breakers:
+        thresholds:
+          - priority: DEFAULT
+            max_connections: 10000
+            max_pending_requests: 20000
+            max_requests: 20000
+            max_retries: 2000
+      health_checks:
+        - timeout: 5s
+          interval: 10s
+          unhealthy_threshold: 3
+          healthy_threshold: 1
+          grpc_health_check:
+            service_name: hazard.Aggregate
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
