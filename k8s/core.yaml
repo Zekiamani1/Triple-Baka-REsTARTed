@@ -5,7 +5,7 @@ metadata:
   labels:
     app: kafka-aggregate
 spec:
-  replicas: 0
+  replicas: 1
   strategy:
     type: Recreate
   selector:
@@ -62,7 +62,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: kafka-init-ha
+  name: kafka-init
   labels:
     app: kafka-init
 spec:
@@ -77,7 +77,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: kafka-init
-          image: apache/kafka:3.8.1
+          image: apache/kafka:latest
           imagePullPolicy: IfNotPresent
           resources:
             requests:
@@ -86,26 +86,82 @@ spec:
               memory: "256Mi"
           command:
             - /bin/sh
-            - -ec
+            - -c
             - |
-              for broker in 1 2 3; do
-                until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server "kafka-aggregate-${broker}:29092" >/dev/null 2>&1; do
-                  echo "Waiting for kafka-aggregate-${broker}:29092..."
-                  sleep 3
-                done
-              done
               until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --list >/dev/null 2>&1; do
-                echo "Waiting for kafka-aggregate bootstrap..."
+                echo "Waiting for kafka-aggregate:29092..."
                 sleep 3
               done
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-events --partitions 1 --replication-factor 3 --config min.insync.replicas=2
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-ingest --partitions 12 --replication-factor 3 --config min.insync.replicas=2
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-events --partitions 1 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-ingest --partitions 12 --replication-factor 1
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --alter --topic hazard-ingest --partitions 12 >/dev/null 2>&1 || true
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic field-reports-ingest --partitions 12 --replication-factor 3 --config min.insync.replicas=2
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic pantai-quarantine --partitions 3 --replication-factor 3 --config min.insync.replicas=2
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-dlq --partitions 3 --replication-factor 3 --config min.insync.replicas=2
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-retry --partitions 3 --replication-factor 3 --config min.insync.replicas=2
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-critical --partitions 12 --replication-factor 3 --config min.insync.replicas=2
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic field-reports-ingest --partitions 12 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic pantai-quarantine --partitions 3 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-dlq --partitions 3 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-retry --partitions 3 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-critical --partitions 12 --replication-factor 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: satellite-poller
+  labels:
+    app: satellite-poller
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: satellite-poller
+  template:
+    metadata:
+      labels:
+        app: satellite-poller
+        role: aggregator
+    spec:
+      containers:
+        - name: satellite-poller
+          image: triple-baka-restarted-satellite-poller:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: satellite-poller-env
+          env:
+            - name: SQLITE_DB_PATH
+              value: /var/lib/satellite-poller/state.db
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          ports:
+            - containerPort: 8087
+              name: health
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8087
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8087
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/satellite-poller
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: satellite-poller-data
 ---
 apiVersion: apps/v1
 kind: Deployment

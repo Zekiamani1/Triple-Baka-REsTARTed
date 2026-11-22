@@ -277,7 +277,7 @@ services:
     volumes:
       - satellite-poller-data:/var/lib/satellite-poller
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8087/health >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8087/health/ready >/dev/null 2>&1"]
       interval: 5s
       timeout: 3s
       retries: 3

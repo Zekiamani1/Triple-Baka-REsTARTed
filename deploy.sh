@@ -21,6 +21,7 @@ for envfile in \
   "External System/PVMBG/.env" \
   "Poller Service/BMKG Poller Service/.env" \
   "Poller Service/PVMBG Poller Service/.env" \
+  "Poller Service/Satellite Poller Service/.env" \
   "Aggregate Service/.env" \
   "Event Consumer/.env" \
   "Alert Consumer/.env"; do
@@ -41,6 +42,35 @@ if ! helm status psmdb-operator -n psmdb-operator >/dev/null 2>&1; then
     --wait
 fi
 
+kubectl apply -f k8s/namespace.yaml
+
+if [[ -n "${PANTAI_AUTH_TOKEN:-}" ]]; then
+  kubectl create secret generic pantai-token \
+    --namespace "$NS" \
+    --from-literal="token=$PANTAI_AUTH_TOKEN" \
+    --dry-run=client -o yaml | kubectl apply -f -
+elif ! kubectl get secret pantai-token -n "$NS" >/dev/null 2>&1; then
+  echo "Set PANTAI_AUTH_TOKEN from the Sensor Pantai credentials before deploying." >&2
+  exit 1
+fi
+
+ensure_random_secret() {
+  local name="$1"
+  local key="$2"
+  if ! kubectl get secret "$name" -n "$NS" >/dev/null 2>&1; then
+    local value
+    value="$(openssl rand -hex 32)"
+    kubectl create secret generic "$name" \
+      --namespace "$NS" \
+      --from-literal="$key=$value"
+    unset value
+  fi
+}
+
+ensure_random_secret pantai-adapter-db password
+ensure_random_secret field-receiver-db password
+ensure_random_secret field-receiver-token token
+
 echo "Applying Kustomize manifests to namespace $NS..."
 kubectl apply -k .
 
@@ -53,6 +83,10 @@ kubectl rollout status deploy/pvmbg -n "$NS" --timeout=300s
 kubectl rollout status deploy/aggregate -n "$NS" --timeout=300s
 kubectl rollout status deploy/bmkg-poller -n "$NS" --timeout=300s
 kubectl rollout status deploy/pvmbg-poller -n "$NS" --timeout=300s
+kubectl rollout status deploy/satellite-poller -n "$NS" --timeout=300s
+kubectl rollout status deploy/sensor-pantai -n "$NS" --timeout=300s
+kubectl rollout status deploy/coastal-adapter -n "$NS" --timeout=300s
+kubectl rollout status deploy/field-receiver -n "$NS" --timeout=300s
 kubectl rollout status deploy/event-consumer -n "$NS" --timeout=300s
 kubectl rollout status deploy/alert-consumer -n "$NS" --timeout=300s
 kubectl rollout status deploy/gateway -n "$NS" --timeout=300s

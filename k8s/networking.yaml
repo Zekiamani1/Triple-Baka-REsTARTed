@@ -41,8 +41,7 @@ metadata:
 spec:
   type: ClusterIP
   selector:
-    app: kafka-ha
-    role: broker
+    app: kafka-aggregate
   ports:
     - name: internal
       port: 29092

@@ -16,7 +16,6 @@ resources:
   - k8s/sensor-pantai.yaml
   - k8s/pantai-state.yaml
   - k8s/pantai.yaml
-  - k8s/kafka-ha.yaml
 
 secretGenerator:
   - name: auth-env
@@ -34,6 +33,9 @@ secretGenerator:
   - name: pvmbg-poller-env
     envs:
       - Poller Service/PVMBG Poller Service/.env
+  - name: satellite-poller-env
+    envs:
+      - Poller Service/Satellite Poller Service/.env
   - name: audit-secret
     envs:
       - .env.example
@@ -44,22 +46,20 @@ secretGenerator:
 configMapGenerator:
   - name: kafka-env
     literals:
-      - CLUSTER_ID=4L6g3nShT-eMCtK--X86sw
+      - KAFKA_NODE_ID=1
       - KAFKA_PROCESS_ROLES=broker,controller
       - KAFKA_LISTENERS=CONTROLLER://:9093,INTERNAL://:29092,EXTERNAL://:9092
+      - KAFKA_ADVERTISED_LISTENERS=INTERNAL://kafka-aggregate:29092,EXTERNAL://localhost:9092
       - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
       - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
       - KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL
-      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka-aggregate-1:9093,2@kafka-aggregate-2:9093,3@kafka-aggregate-3:9093
-      - KAFKA_LOG_DIRS=/var/lib/kafka/data
-      - KAFKA_DEFAULT_REPLICATION_FACTOR=3
-      - KAFKA_MIN_INSYNC_REPLICAS=2
-      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=3
-      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=3
-      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=2
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
       - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
       - KAFKA_NUM_PARTITIONS=12
-      - KAFKA_HEAP_OPTS=-Xmx384m -Xms256m
+      - KAFKA_HEAP_OPTS=-Xmx512m -Xms256m
   - name: aggregate-env
     envs:
       - Aggregate Service/.env
