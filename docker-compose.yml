@@ -265,6 +265,9 @@ services:
     env_file:
       - path: "./Poller Service/Satellite Poller Service/.env"
         required: false
+    environment:
+      OTEL_SERVICE_NAME: satellite-poller
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-lgtm:4317
     depends_on:
       kafka-init-ingest:
         condition: service_completed_successfully

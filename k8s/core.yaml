@@ -130,6 +130,10 @@ spec:
           env:
             - name: SQLITE_DB_PATH
               value: /var/lib/satellite-poller/state.db
+            - name: OTEL_SERVICE_NAME
+              value: satellite-poller
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-lgtm:4317
           resources:
             requests:
               cpu: 100m

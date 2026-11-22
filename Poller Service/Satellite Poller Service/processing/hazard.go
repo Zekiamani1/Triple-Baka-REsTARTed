@@ -44,6 +44,7 @@ func BuildHazardEvent(cluster domain.FireCluster, now time.Time) (domain.HazardE
 		SourceRefID: cluster.SourceRefID,
 		HazardType:  "WILDFIRE",
 		Severity:    cluster.Severity,
+		AreaName:    ResolveProvince(cluster.Latitude, cluster.Longitude),
 		Latitude:    cluster.Latitude,
 		Longitude:   cluster.Longitude,
 		OccurredAt:  cluster.OccurredAt.UTC(),

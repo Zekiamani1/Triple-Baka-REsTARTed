@@ -13,6 +13,11 @@ import (
 	"time"
 
 	"satellitepoller/domain"
+	"satellitepoller/telemetry"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 const (
@@ -112,6 +117,28 @@ func (p *Processor) Run(ctx context.Context) error {
 	}
 }
 
+// WarmStats seeds in-memory cluster/singleton gauges from durable SQLite state on startup.
+func (p *Processor) WarmStats(ctx context.Context) error {
+	detections, err := p.repo.LoadDetections(ctx)
+	if err != nil {
+		return fmt.Errorf("warm stats load detections: %w", err)
+	}
+	clusters, err := p.repo.LoadClusters(ctx)
+	if err != nil {
+		return fmt.Errorf("warm stats load clusters: %w", err)
+	}
+	active := uint64(0)
+	for _, cluster := range clusters {
+		if cluster.Status == domain.ClusterActive {
+			active++
+		}
+	}
+	_, singles := BuildClusters(detections, time.Now().UTC())
+	p.stats.activeClusters.Store(active)
+	p.stats.singleDetections.Store(uint64(singles))
+	return nil
+}
+
 // ProcessAvailable processes up to BatchSize inbox events in ascending offset
 // order. It loads the state once, applies the batch, recomputes clustering once,
 // then commits the full state and the final processing offset atomically.
@@ -132,22 +159,36 @@ func (p *Processor) ProcessAvailable(ctx context.Context) (int, error) {
 	if len(events) == 0 {
 		return 0, nil
 	}
+
+	spanCtx, span := otel.Tracer(telemetry.Scope).Start(ctx, "satellite.process_batch")
+	defer span.End()
+
 	sort.Slice(events, func(i, j int) bool { return events[i].Offset < events[j].Offset })
 	for i := 1; i < len(events); i++ {
 		if events[i].Offset != events[i-1].Offset+1 {
-			return 0, fmt.Errorf("processing inbox offset gap: previous=%d current=%d", events[i-1].Offset, events[i].Offset)
+			err := fmt.Errorf("processing inbox offset gap: previous=%d current=%d", events[i-1].Offset, events[i].Offset)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return 0, err
 		}
 	}
 	if found && events[0].Offset != after+1 {
-		return 0, fmt.Errorf("processing inbox offset gap: checkpoint=%d first_pending=%d", after, events[0].Offset)
+		err := fmt.Errorf("processing inbox offset gap: checkpoint=%d first_pending=%d", after, events[0].Offset)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return 0, err
 	}
 
-	detections, err := p.repo.LoadDetections(ctx)
+	detections, err := p.repo.LoadDetections(spanCtx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return 0, fmt.Errorf("load detections: %w", err)
 	}
-	oldClusters, err := p.repo.LoadClusters(ctx)
+	oldClusters, err := p.repo.LoadClusters(spanCtx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return 0, fmt.Errorf("load clusters: %w", err)
 	}
 	detectionMap := make(map[string]domain.Detection, len(detections)+len(events))
@@ -158,11 +199,13 @@ func (p *Processor) ProcessAvailable(ctx context.Context) (int, error) {
 	var duplicates, filtered, late uint64
 	changed := false
 	for _, event := range events {
-		if err := ctx.Err(); err != nil {
+		if err := spanCtx.Err(); err != nil {
 			return 0, nil
 		}
 		itemChanged, duplicate, itemFiltered, itemLate, err := p.applyEvent(event, detectionMap)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return 0, fmt.Errorf("offset %d (%s): %w", event.Offset, event.Type, err)
 		}
 		if itemChanged {
@@ -193,13 +236,17 @@ func (p *Processor) ProcessAvailable(ctx context.Context) (int, error) {
 		singleCount = singles
 		clusters, outbox, err = ReconcileClusters(oldClusters, computed, time.Now().UTC())
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return 0, fmt.Errorf("reconcile fire clusters: %w", err)
 		}
 	}
 
 	lastOffset := events[len(events)-1].Offset
 	checkpoint := domain.Checkpoint{Name: ProcessingCheckpointName, Offset: lastOffset, UpdatedAt: time.Now().UTC()}
-	if err := p.repo.CommitProcessing(ctx, checkpoint, allDetections, clusters, outbox); err != nil {
+	if err := p.repo.CommitProcessing(spanCtx, checkpoint, allDetections, clusters, outbox); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return 0, fmt.Errorf("commit processing batch through offset %d: %w", lastOffset, err)
 	}
 
@@ -217,7 +264,17 @@ func (p *Processor) ProcessAvailable(ctx context.Context) (int, error) {
 		p.stats.activeClusters.Store(uint64(active))
 		p.stats.singleDetections.Store(uint64(singleCount))
 	}
-	p.logger.Debug("satellite inbox batch processed",
+	telemetry.RecordBatchProcessed(spanCtx, len(events), int(duplicates), int(filtered), int(late))
+	span.SetAttributes(
+		attribute.Int("batch.events", len(events)),
+		attribute.Int64("batch.duplicates", int64(duplicates)),
+		attribute.Int64("batch.filtered", int64(filtered)),
+		attribute.Int64("batch.late", int64(late)),
+		attribute.Int64("clusters.active", int64(p.stats.activeClusters.Load())),
+		attribute.Int64("detections.single", int64(p.stats.singleDetections.Load())),
+		attribute.Int("outbox.events", len(outbox)),
+	)
+	p.logger.DebugContext(spanCtx, "satellite inbox batch processed",
 		"first_offset", events[0].Offset,
 		"last_offset", lastOffset,
 		"event_count", len(events),

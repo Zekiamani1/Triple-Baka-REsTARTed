@@ -14,9 +14,16 @@ import (
 	"log/slog"
 	"net/http"
 	"satellitepoller/domain"
+	"satellitepoller/telemetry"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const feedCheckpointName = "satellite-feed"
@@ -54,10 +61,13 @@ type Options struct {
 }
 
 type Service struct {
-	client Client
-	repo   Repository
-	opts   Options
-	logger *slog.Logger
+	client            Client
+	repo              Repository
+	opts              Options
+	logger            *slog.Logger
+	currentFeedOffset atomic.Int64
+	latestFeedOffset  atomic.Int64
+	hasFeedOffset     atomic.Bool
 }
 
 // NewService creates an ingestion service.
@@ -84,12 +94,25 @@ func NewService(client *Client, repo Repository, opts Options) (*Service, error)
 		return nil, errors.New("session latest offset cannot be negative")
 	}
 
-	return &Service{
+	svc := &Service{
 		client: *client,
 		repo:   repo,
 		opts:   opts,
 		logger: opts.Logger.With("component", "satellite-ingestion"),
-	}, nil
+	}
+	if opts.HasLatestOffset {
+		svc.latestFeedOffset.Store(opts.LatestOffset)
+	}
+	return svc, nil
+}
+
+// Offsets returns the latest durable feed offset, whether any feed checkpoint
+// has been recorded, and the highest known upstream stream offset.
+func (s *Service) Offsets() (feedOffset int64, latestOffset int64, hasFeed bool) {
+	if s == nil {
+		return 0, 0, false
+	}
+	return s.currentFeedOffset.Load(), s.latestFeedOffset.Load(), s.hasFeedOffset.Load()
 }
 
 // makan feed sampai ctx cancel / gak bisa retry
@@ -104,6 +127,8 @@ func (s *Service) Run(ctx context.Context) error {
 	if found {
 		lastOffset = checkpoint.Offset
 		from = strconv.FormatInt(lastOffset, 10)
+		s.currentFeedOffset.Store(lastOffset)
+		s.hasFeedOffset.Store(true)
 	}
 
 	if s.opts.HasLatestOffset {
@@ -178,6 +203,15 @@ func (s *Service) Run(ctx context.Context) error {
 				return fmt.Errorf("%w: last=%d received=%d", ErrOffsetGap, lastOffset, offset)
 			}
 
+			spanCtx, span := otel.Tracer(telemetry.Scope).Start(
+				ctx,
+				"satellite.ingest_event",
+				trace.WithAttributes(
+					attribute.Int64("satellite.offset", offset),
+					attribute.String("satellite.event_type", event.Type),
+				),
+			)
+
 			now := time.Now().UTC()
 			inboxEvent := domain.InboxEvent{
 				Offset:     offset,
@@ -191,7 +225,10 @@ func (s *Service) Run(ctx context.Context) error {
 				UpdatedAt: now,
 			}
 
-			if err := s.repo.SaveInboxEventAndCheckpoint(ctx, inboxEvent, newCheckpoint); err != nil {
+			if err := s.repo.SaveInboxEventAndCheckpoint(spanCtx, inboxEvent, newCheckpoint); err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+				span.End()
 				return fmt.Errorf("persist feed event at offset %d: %w", offset, err)
 			}
 
@@ -199,10 +236,17 @@ func (s *Service) Run(ctx context.Context) error {
 			hasCheckpoint = true
 			from = strconv.FormatInt(lastOffset, 10)
 			processedOnConnection = true
-			s.logger.Debug("satellite event persisted",
+			s.currentFeedOffset.Store(offset)
+			s.hasFeedOffset.Store(true)
+			if offset > s.latestFeedOffset.Load() {
+				s.latestFeedOffset.Store(offset)
+			}
+			telemetry.RecordEventIngested(spanCtx, event.Type)
+			s.logger.DebugContext(spanCtx, "satellite event persisted",
 				"offset", offset,
 				"event_type", event.Type,
 			)
+			span.End()
 			return nil
 		})
 

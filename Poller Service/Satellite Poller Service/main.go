@@ -23,6 +23,11 @@ import (
 	"satellitepoller/domain"
 	"satellitepoller/processing"
 	"satellitepoller/storage"
+	"satellitepoller/telemetry"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 const (
@@ -77,9 +82,7 @@ func main() {
 }
 
 func run() error {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
+	logger := telemetry.NewContextLogger(slog.LevelInfo)
 	slog.SetDefault(logger)
 
 	cfg, err := Load()
@@ -90,6 +93,19 @@ func run() error {
 	// Use the signal context for startup as well as normal operation.
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	shutdownTelemetry, err := telemetry.Init(rootCtx)
+	if err != nil {
+		logger.Warn("opentelemetry initialization failed; continuing without OTLP exporter", "error", err)
+	} else {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if shutdownErr := shutdownTelemetry(shutdownCtx); shutdownErr != nil {
+				logger.Warn("opentelemetry shutdown failed", "error", shutdownErr)
+			}
+		}()
+	}
 
 	startupCtx, cancelStartup := context.WithTimeout(rootCtx, startupTimeout)
 	db, err := storage.Open(startupCtx, cfg.SQLiteDBPath)
@@ -149,6 +165,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("create processing service: %w", err)
 	}
+	warmCtx, cancelWarm := context.WithTimeout(rootCtx, startupTimeout)
+	if warmErr := processor.WarmStats(warmCtx); warmErr != nil {
+		logger.Warn("failed to warm satellite processor stats", "error", warmErr)
+	}
+	cancelWarm()
+
 	kafkaPublisher, err := NewKafkaPublisher(
 		cfg.KafkaBrokers,
 		cfg.KafkaTopicHazardIngest,
@@ -167,7 +189,85 @@ func run() error {
 		}
 	}()
 
-	healthServer := newHealthServer(cfg.HealthPort, db)
+	collectStats := func(ctx context.Context) map[string]any {
+		procStats := processor.Snapshot()
+		feedOffset, latestKnown, hasFeed := ingestionService.Offsets()
+		if !hasFeed {
+			if cp, found, err := repo.GetCheckpoint(ctx, "satellite-feed"); err == nil && found {
+				feedOffset = cp.Offset
+				hasFeed = true
+			}
+		}
+		procOffset := int64(-1)
+		if cp, found, err := repo.GetCheckpoint(ctx, processing.ProcessingCheckpointName); err == nil && found {
+			procOffset = cp.Offset
+		}
+		outboxPending, _ := repo.OutboxPendingCount(ctx)
+
+		ingestLag := int64(0)
+		if hasFeed && latestKnown > feedOffset {
+			ingestLag = latestKnown - feedOffset
+		} else if !hasFeed && latestKnown > 0 {
+			ingestLag = latestKnown
+		}
+		processingLag := int64(0)
+		if hasFeed && feedOffset > procOffset {
+			processingLag = feedOffset - procOffset
+		}
+		return map[string]any{
+			"service": "satellite-poller",
+			"stats": map[string]any{
+				"processed_events":    procStats.ProcessedEvents,
+				"duplicate_events":    procStats.DuplicateEvents,
+				"filtered_detections": procStats.FilteredDetections,
+				"late_detections":     procStats.LateDetections,
+				"active_clusters":     procStats.ActiveClusters,
+				"single_detections":   procStats.SingleDetections,
+			},
+			"checkpoints": map[string]any{
+				"feed_offset":            feedOffset,
+				"processing_offset":      procOffset,
+				"session_latest_offset":  latestKnown,
+				"ingest_lag_offsets":     ingestLag,
+				"processing_lag_offsets": processingLag,
+			},
+			"outbox_pending": outboxPending,
+		}
+	}
+
+	metricReg, err := telemetry.RegisterRuntimeMetrics(func(ctx context.Context) telemetry.RuntimeSnapshot {
+		procStats := processor.Snapshot()
+		feedOffset, latestKnown, hasFeed := ingestionService.Offsets()
+		procOffset := int64(-1)
+		if cp, found, cpErr := repo.GetCheckpoint(ctx, processing.ProcessingCheckpointName); cpErr == nil && found {
+			procOffset = cp.Offset
+		}
+		outboxPending, _ := repo.OutboxPendingCount(ctx)
+		ingestLag := int64(0)
+		if hasFeed && latestKnown > feedOffset {
+			ingestLag = latestKnown - feedOffset
+		} else if !hasFeed && latestKnown > 0 {
+			ingestLag = latestKnown
+		}
+		processingLag := int64(0)
+		if hasFeed && feedOffset > procOffset {
+			processingLag = feedOffset - procOffset
+		}
+		return telemetry.RuntimeSnapshot{
+			ActiveClusters: int64(procStats.ActiveClusters),
+			SingleHotspots: int64(procStats.SingleDetections),
+			OutboxPending:  outboxPending,
+			IngestLag:      ingestLag,
+			ProcessingLag:  processingLag,
+		}
+	})
+	if err != nil {
+		logger.Warn("register satellite runtime OTel metrics failed", "error", err)
+	} else if metricReg != nil {
+		defer func() { _ = metricReg.Unregister() }()
+	}
+
+	healthServer := newHealthServer(cfg.HealthPort, db, collectStats)
 	workerCtx, cancelWorkers := context.WithCancel(rootCtx)
 	defer cancelWorkers()
 
@@ -520,12 +620,23 @@ func (p *Publisher) publishPending(ctx context.Context) error {
 			return nil
 		}
 
+		pubCtx, pubSpan := otel.Tracer(telemetry.Scope).Start(ctx, "satellite.kafka_publish")
+		pubSpan.SetAttributes(
+			attribute.String("messaging.system", "kafka"),
+			attribute.String("messaging.destination.name", p.topic),
+			attribute.Int("batch.size", len(events)),
+		)
+
 		messages := make([]kafka.Message, 0, len(events))
+		operations := make([]string, 0, len(events))
 
 		for _, event := range events {
 			payload, err := p.encoder.Encode(event)
 			if err != nil {
-				p.recordBatchFailure(ctx, events, err)
+				pubSpan.RecordError(err)
+				pubSpan.SetStatus(codes.Error, err.Error())
+				pubSpan.End()
+				p.recordBatchFailure(pubCtx, events, err)
 				return fmt.Errorf(
 					"encode outbox event %q: %w",
 					event.EventID,
@@ -542,14 +653,18 @@ func (p *Publisher) publishPending(ctx context.Context) error {
 				},
 			}
 
+			operation := "retract"
 			// A tombstone has no JSON payload, so do not label it
 			// as application/json.
 			if payload != nil {
+				operation = "upsert"
 				headers = append(headers, kafka.Header{
 					Key:   "content-type",
 					Value: []byte("application/json"),
 				})
 			}
+			headers = telemetry.InjectKafkaHeaders(pubCtx, headers)
+			operations = append(operations, operation)
 
 			messages = append(messages, kafka.Message{
 				Key:     []byte(event.SourceRefID),
@@ -559,29 +674,46 @@ func (p *Publisher) publishPending(ctx context.Context) error {
 			})
 		}
 
-		if err := p.writer.WriteMessages(ctx, messages...); err != nil {
+		writeStart := time.Now()
+		err = p.writer.WriteMessages(pubCtx, messages...)
+		durationMs := float64(time.Since(writeStart).Milliseconds())
+		if err != nil {
+			for _, op := range operations {
+				telemetry.RecordKafkaPublish(pubCtx, p.topic, op, "error", durationMs)
+			}
+			pubSpan.RecordError(err)
+			pubSpan.SetStatus(codes.Error, err.Error())
+			pubSpan.End()
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			p.recordBatchFailure(ctx, events, err)
+			p.recordBatchFailure(pubCtx, events, err)
 			return fmt.Errorf("write %d messages to Kafka topic %q: %w", len(messages), p.topic, err)
+		}
+
+		for _, op := range operations {
+			telemetry.RecordKafkaPublish(pubCtx, p.topic, op, "success", durationMs)
 		}
 
 		publishedAt := time.Now().UTC()
 		for _, event := range events {
-			if err := p.repo.MarkOutboxPublished(ctx, event.EventID, publishedAt); err != nil {
+			if err := p.repo.MarkOutboxPublished(pubCtx, event.EventID, publishedAt); err != nil {
+				pubSpan.RecordError(err)
+				pubSpan.SetStatus(codes.Error, err.Error())
+				pubSpan.End()
 				// Kafka may already contain the message. Leave this record pending;
 				// retry is safe only when the consumer deduplicates event_id/revision.
 				return fmt.Errorf("mark outbox event %q as published: %w", event.EventID, err)
 			}
 		}
 
-		p.logger.Debug("published Kafka outbox batch",
+		p.logger.DebugContext(pubCtx, "published Kafka outbox batch",
 			"topic", p.topic,
 			"event_count", len(events),
 			"first_event_id", events[0].EventID,
 			"last_event_id", events[len(events)-1].EventID,
 		)
+		pubSpan.End()
 
 		if len(events) < p.batch {
 			return nil
@@ -672,7 +804,11 @@ func (HazardProtoJSONEncoder) Encode(
 	}
 }
 
-func newHealthServer(port string, db interface{ PingContext(context.Context) error }) *http.Server {
+func newHealthServer(
+	port string,
+	db interface{ PingContext(context.Context) error },
+	statsProvider func(context.Context) map[string]any,
+) *http.Server {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, r *http.Request) {
@@ -691,6 +827,18 @@ func newHealthServer(port string, db interface{ PingContext(context.Context) err
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ready\n")
+	})
+
+	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		payload := map[string]any{"service": "satellite-poller"}
+		if statsProvider != nil {
+			payload = statsProvider(ctx)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(payload)
 	})
 
 	return &http.Server{
