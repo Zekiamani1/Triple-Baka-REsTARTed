@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: kafka-init-pantai
+  name: kafka-init-pantai-ha
   labels:
     app: kafka-init-pantai
     role: other
@@ -16,19 +16,20 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: create-pantai-topics
-          image: apache/kafka:latest
+          image: apache/kafka:3.8.1
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
             - -ec
             - |
-              until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --list >/dev/null 2>&1; do
-                echo "Waiting for kafka-aggregate..."
-                sleep 3
+              for broker in 1 2 3; do
+                until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server "kafka-aggregate-${broker}:29092" >/dev/null 2>&1; do
+                  echo "Waiting for kafka-aggregate-${broker}..."
+                  sleep 3
+                done
               done
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic pantai-ingest --partitions 12 --replication-factor 1
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic pantai-quarantine --partitions 3 --replication-factor 1
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-critical --partitions 12 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic pantai-ingest --partitions 12 --replication-factor 3 --config min.insync.replicas=2
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic pantai-quarantine --partitions 3 --replication-factor 3 --config min.insync.replicas=2
           resources:
             requests:
               cpu: 50m
@@ -59,7 +60,7 @@ spec:
     spec:
       initContainers:
         - name: wait-for-pantai-topics
-          image: apache/kafka:latest
+          image: apache/kafka:3.8.1
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh

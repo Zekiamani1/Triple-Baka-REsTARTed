@@ -5,7 +5,7 @@ metadata:
   labels:
     app: kafka-aggregate
 spec:
-  replicas: 1
+  replicas: 0
   strategy:
     type: Recreate
   selector:
@@ -62,7 +62,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: kafka-init
+  name: kafka-init-ha
   labels:
     app: kafka-init
 spec:
@@ -77,7 +77,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: kafka-init
-          image: apache/kafka:latest
+          image: apache/kafka:3.8.1
           imagePullPolicy: IfNotPresent
           resources:
             requests:
@@ -86,18 +86,25 @@ spec:
               memory: "256Mi"
           command:
             - /bin/sh
-            - -c
+            - -ec
             - |
+              for broker in 1 2 3; do
+                until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server "kafka-aggregate-${broker}:29092" >/dev/null 2>&1; do
+                  echo "Waiting for kafka-aggregate-${broker}:29092..."
+                  sleep 3
+                done
+              done
               until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --list >/dev/null 2>&1; do
-                echo "Waiting for kafka-aggregate:29092..."
+                echo "Waiting for kafka-aggregate bootstrap..."
                 sleep 3
               done
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-events --partitions 1 --replication-factor 1
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-ingest --partitions 12 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-events --partitions 1 --replication-factor 3 --config min.insync.replicas=2
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-ingest --partitions 12 --replication-factor 3 --config min.insync.replicas=2
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --alter --topic hazard-ingest --partitions 12 >/dev/null 2>&1 || true
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic field-reports-ingest --partitions 12 --replication-factor 1
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-dlq --partitions 3 --replication-factor 1
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-retry --partitions 3 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic field-reports-ingest --partitions 12 --replication-factor 3 --config min.insync.replicas=2
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-dlq --partitions 3 --replication-factor 3 --config min.insync.replicas=2
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-retry --partitions 3 --replication-factor 3 --config min.insync.replicas=2
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-critical --partitions 12 --replication-factor 3 --config min.insync.replicas=2
 ---
 apiVersion: apps/v1
 kind: Deployment
