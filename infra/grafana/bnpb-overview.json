@@ -2,48 +2,84 @@
   "uid": "bnpb-overview",
   "title": "BNPB Disaster Information System - Unified Observability",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "10s",
   "panels": [
     {
       "id": 1,
       "type": "timeseries",
-      "title": "Request & Operation Latency (p50 / p95 / p99)",
+      "title": "Service RPC & Delivery Latency (p50 / p95 / p99)",
       "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "histogram_quantile(0.50, sum(rate(http_server_duration_milliseconds_bucket[1m])) by (le, service_name))", "legendFormat": "p50 {{service_name}}" },
-        { "expr": "histogram_quantile(0.95, sum(rate(http_server_duration_milliseconds_bucket[1m])) by (le, service_name))", "legendFormat": "p95 {{service_name}}" },
-        { "expr": "histogram_quantile(0.99, sum(rate(http_server_duration_milliseconds_bucket[1m])) by (le, service_name))", "legendFormat": "p99 {{service_name}}" }
+        { "expr": "histogram_quantile(0.50, sum(rate(aggregate_grpc_duration_ms_bucket[1m])) by (le, method))", "legendFormat": "agg p50 {{method}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(aggregate_grpc_duration_ms_bucket[1m])) by (le, method))", "legendFormat": "agg p95 {{method}}" },
+        { "expr": "histogram_quantile(0.99, sum(rate(aggregate_grpc_duration_ms_bucket[1m])) by (le, method))", "legendFormat": "agg p99 {{method}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(auth_rpc_duration_ms_bucket[1m])) by (le, method))", "legendFormat": "auth p95 {{method}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(alert_consumer_notification_delivery_duration_ms_bucket[1m])) by (le))", "legendFormat": "alert delivery p95" }
       ]
     },
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Throughput (req/s & events/s)",
+      "title": "Ingestion & Consumer Throughput (events/s)",
       "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
       "targets": [
         { "expr": "sum(rate(aggregate_ingest_events_total[1m])) by (status)", "legendFormat": "ingest {{status}}" },
-        { "expr": "sum(rate(kafka_messages_consumed_total[1m])) by (topic, status)", "legendFormat": "kafka {{topic}} {{status}}" }
+        { "expr": "sum(rate(aggregate_kafka_consumed_total[1m])) by (topic, status)", "legendFormat": "agg kafka {{topic}} {{status}}" },
+        { "expr": "sum(rate(event_consumer_messages_consumed_total[1m])) by (status)", "legendFormat": "event-consumer {{status}}" },
+        { "expr": "sum(rate(alert_consumer_messages_consumed_total[1m])) by (topic, status)", "legendFormat": "alert-consumer {{topic}} {{status}}" }
       ]
     },
     {
       "id": 3,
       "type": "timeseries",
-      "title": "Error Rate (gRPC / Kafka / Poll)",
+      "title": "Error Rate (gRPC / Kafka / Auth / Delivery)",
       "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
       "targets": [
         { "expr": "sum(rate(aggregate_grpc_requests_total{status!=\"OK\"}[1m])) by (method)", "legendFormat": "grpc err {{method}}" },
-        { "expr": "sum(rate(kafka_messages_consumed_total{status!=\"success\"}[1m])) by (topic, status)", "legendFormat": "kafka err {{topic}} {{status}}" }
+        { "expr": "sum(rate(aggregate_kafka_consumed_total{status!=\"success\"}[1m])) by (topic, status)", "legendFormat": "kafka err {{topic}} {{status}}" },
+        { "expr": "sum(rate(auth_failures_total[1m])) by (reason)", "legendFormat": "auth fail {{reason}}" },
+        { "expr": "sum(rate(alert_consumer_notification_delivery_total{status!=\"success\"}[1m])) by (status)", "legendFormat": "delivery err {{status}}" }
       ]
     },
     {
       "id": 4,
       "type": "timeseries",
-      "title": "MongoDB Latency, DLQ & Fencing Rejections",
+      "title": "MongoDB Latency, Pollers & Alerts",
       "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
       "targets": [
         { "expr": "histogram_quantile(0.95, sum(rate(aggregate_mongo_operation_duration_ms_bucket[1m])) by (le, operation))", "legendFormat": "mongo p95 {{operation}}" },
-        { "expr": "sum(rate(aggregate_fencing_rejected_total[1m]))", "legendFormat": "stale fencing rejected" }
+        { "expr": "sum(rate(bmkg_poller_events_fetched_total[1m])) by (type)", "legendFormat": "bmkg fetched {{type}}" },
+        { "expr": "sum(rate(pvmbg_poller_events_fetched_total[1m])) by (type)", "legendFormat": "pvmbg fetched {{type}}" },
+        { "expr": "sum(rate(alert_consumer_alerts_triggered_total[1m])) by (severity)", "legendFormat": "alerts {{severity}}" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "P4 Satellite Wildfire Poller (Clusters, Hotspots, Backlog & Lag)",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "satellite_poller_clusters_active", "legendFormat": "active clusters" },
+        { "expr": "satellite_poller_detections_single", "legendFormat": "single hotspots" },
+        { "expr": "satellite_poller_outbox_pending", "legendFormat": "outbox pending" },
+        { "expr": "satellite_poller_feed_lag_offsets", "legendFormat": "feed lag (offsets)" },
+        { "expr": "satellite_poller_processing_lag_offsets", "legendFormat": "processing lag (offsets)" },
+        { "expr": "sum(rate(satellite_poller_events_ingested_total[1m])) by (type)", "legendFormat": "ingested/s {{type}}" },
+        { "expr": "sum(rate(satellite_poller_detections_late_total[1m]))", "legendFormat": "late detections/s" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "P5 Sensor Pantai Coastal Adapter (Breaker, Freshness & Quarantine)",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "pantai_circuit_state", "legendFormat": "circuit state (0=closed,1=open,2=half_open)" },
+        { "expr": "pantai_last_data_age_seconds", "legendFormat": "last good age (s)" },
+        { "expr": "sum(rate(pantai_hazards_published_total[1m]))", "legendFormat": "coastal hazards/s" },
+        { "expr": "sum(rate(pantai_quarantine_total[1m])) by (reason)", "legendFormat": "quarantined/s {{reason}}" },
+        { "expr": "sum(rate(pantai_stale_observation_pages_total[1m]))", "legendFormat": "stale pages/s" }
       ]
     }
   ]
