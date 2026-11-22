@@ -39,6 +39,8 @@ if ! helm status psmdb-operator -n psmdb-operator >/dev/null 2>&1; then
     --version 1.19.0 \
     --namespace psmdb-operator \
     --create-namespace \
+    --set watchAllNamespaces=false \
+    --set watchNamespace="$NS" \
     --wait
 fi
 

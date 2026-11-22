@@ -9,7 +9,13 @@ kubectl patch psmdb mongo-cluster -n "$NS" --type=json -p='[
     "labels":{"role":"store"},
     "resources":{"requests":{"memory":"512Mi"},"limits":{"memory":"1Gi"}},
     "configuration":"storage:\n  wiredTiger:\n    engineConfig:\n      cacheSizeGB: 0.25\n",
+    "topologySpreadConstraints":[{
+      "maxSkew":1,
+      "topologyKey":"kubernetes.io/hostname",
+      "whenUnsatisfiable":"DoNotSchedule",
+      "labelSelector":{"matchLabels":{"app.kubernetes.io/replset":"shard3"}}
+    }],
     "expose":{"enabled":false,"type":"ClusterIP"},
-    "volumeSpec":{"persistentVolumeClaim":{"resources":{"requests":{"storage":"1Gi"}}}}
+    "volumeSpec":{"persistentVolumeClaim":{"storageClassName":"local-path","resources":{"requests":{"storage":"1Gi"}}}}
   }}
 ]'

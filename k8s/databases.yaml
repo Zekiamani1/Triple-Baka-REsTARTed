@@ -68,14 +68,13 @@ spec:
         periodSeconds: 10
         timeoutSeconds: 15
         failureThreshold: 10
-      affinity:
-        topologySpreadConstraints:
-          - maxSkew: 1
-            topologyKey: kubernetes.io/hostname
-            whenUnsatisfiable: DoNotSchedule
-            labelSelector:
-              matchLabels:
-                app.kubernetes.io/component: configsvr
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: configsvr
       expose:
         enabled: false
         type: ClusterIP
@@ -86,7 +85,7 @@ spec:
             requests:
               storage: 1Gi
     mongos:
-      size: 4
+      size: 3
       labels:
         role: store
       resources:
@@ -101,14 +100,13 @@ spec:
         periodSeconds: 10
         timeoutSeconds: 15
         failureThreshold: 10
-      affinity:
-        topologySpreadConstraints:
-          - maxSkew: 1
-            topologyKey: kubernetes.io/hostname
-            whenUnsatisfiable: ScheduleAnyway
-            labelSelector:
-              matchLabels:
-                app.kubernetes.io/component: mongos
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: mongos
       expose:
         type: ClusterIP
   replsets:
@@ -133,14 +131,13 @@ spec:
         periodSeconds: 10
         timeoutSeconds: 15
         failureThreshold: 10
-      affinity:
-        topologySpreadConstraints:
-          - maxSkew: 1
-            topologyKey: kubernetes.io/hostname
-            whenUnsatisfiable: DoNotSchedule
-            labelSelector:
-              matchLabels:
-                app.kubernetes.io/replset: shard1
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/replset: shard1
       expose:
         enabled: false
         type: ClusterIP
@@ -171,14 +168,13 @@ spec:
         periodSeconds: 10
         timeoutSeconds: 15
         failureThreshold: 10
-      affinity:
-        topologySpreadConstraints:
-          - maxSkew: 1
-            topologyKey: kubernetes.io/hostname
-            whenUnsatisfiable: DoNotSchedule
-            labelSelector:
-              matchLabels:
-                app.kubernetes.io/replset: shard2
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/replset: shard2
       expose:
         enabled: false
         type: ClusterIP

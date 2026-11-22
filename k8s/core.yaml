@@ -88,18 +88,25 @@ spec:
             - /bin/sh
             - -c
             - |
+              set -e
               until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --list >/dev/null 2>&1; do
                 echo "Waiting for kafka-aggregate:29092..."
                 sleep 3
               done
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-events --partitions 1 --replication-factor 1
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-ingest --partitions 12 --replication-factor 1
+              create_topic() {
+                until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic "$1" --partitions "$2" --replication-factor 1; do
+                  sleep 2
+                done
+              }
+              create_topic hazard-events 1
+              create_topic hazard-ingest 12
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --alter --topic hazard-ingest --partitions 12 >/dev/null 2>&1 || true
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic field-reports-ingest --partitions 12 --replication-factor 1
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic pantai-quarantine --partitions 3 --replication-factor 1
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-dlq --partitions 3 --replication-factor 1
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-retry --partitions 3 --replication-factor 1
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-critical --partitions 12 --replication-factor 1
+              create_topic field-reports-ingest 12
+              create_topic pantai-quarantine 3
+              create_topic hazard-dlq 3
+              create_topic hazard-retry 3
+              create_topic hazard-critical 12
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --list
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -174,7 +181,7 @@ metadata:
   labels:
     app: aggregate
 spec:
-  replicas: 4
+  replicas: 3
   strategy:
     type: RollingUpdate
     rollingUpdate:
