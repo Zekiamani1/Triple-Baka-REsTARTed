@@ -15,6 +15,8 @@ export const kafka = {
   inTopic: required('KAFKA_TOPIC_HAZARD_INGEST', 'hazard-ingest'),
   expectedSource: process.env.KAFKA_EXPECTED_SOURCE?.trim() || undefined,
   outTopic: required('KAFKA_TOPIC_HAZARD_EVENTS', 'hazard-events'),
+  criticalTopic: required('KAFKA_TOPIC_HAZARD_CRITICAL', 'hazard-critical'),
+  subscribeAuxiliaryTopics: (process.env.KAFKA_SUBSCRIBE_AUXILIARY_TOPICS ?? 'true').toLowerCase() === 'true',
   fieldReportsTopic: required('KAFKA_TOPIC_FIELD_REPORTS', 'field-reports-ingest'),
   dlqTopic: required('KAFKA_TOPIC_HAZARD_DLQ', 'hazard-dlq'),
   retryTopic: required('KAFKA_TOPIC_HAZARD_RETRY', 'hazard-retry'),
@@ -30,7 +32,13 @@ export const sensorPantai = {
   statusUrl: process.env.SENSOR_PANTAI_STATUS_URL?.trim() || undefined,
   statusTimeoutMs: parseInt(process.env.SENSOR_PANTAI_STATUS_TIMEOUT_MS ?? '250', 10),
 };
+
+const rawMode = (process.env.AGGREGATE_MODE ?? 'all').trim().toLowerCase();
+if (rawMode !== 'api' && rawMode !== 'ingester' && rawMode !== 'all') {
+  throw new Error(`Invalid AGGREGATE_MODE: ${rawMode} (expected api, ingester, or all)`);
+}
  
 export const service = {
   port: parseInt(required('AGGREGATOR_PORT', '50051'), 10),
+  mode: rawMode as 'api' | 'ingester' | 'all',
 };

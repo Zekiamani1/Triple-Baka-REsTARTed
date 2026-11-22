@@ -77,7 +77,8 @@ let stopping = false;
 const healthWatchers = new Set<grpc.ServerWritableStream<any, any>>();
 
 function healthStatus(): string {
-    return ready && !stopping && isKafkaReady() ? "SERVING" : "NOT_SERVING";
+    const kafkaOk = service.mode === "api" || isKafkaReady();
+    return ready && !stopping && kafkaOk ? "SERVING" : "NOT_SERVING";
 }
 
 async function currentHealthStatus(): Promise<string> {
@@ -605,7 +606,6 @@ async function main () {
     await collection.createIndex({ hazard_id: 1 });
     unprocessedCol = await ensureUnprocessedIndexes(db);
 
-    await connectKafka();
     internalHttpServer = startInternalHttpServer({
         mongoClient,
         dbName: mongo.dbName,
@@ -614,7 +614,10 @@ async function main () {
         ingestHazard,
         publishFieldReport,
     });
-    void runIngestConsumer({
+    const runIngester = service.mode === "ingester" || service.mode === "all";
+    if (runIngester) {
+      await connectKafka();
+      void runIngestConsumer({
         onHazard: (hazard) => ingestHazard(hazard),
         onDlqMessage: async (dlq) => {
             await parkUnprocessedMessage(unprocessedCol, {
@@ -662,12 +665,13 @@ async function main () {
                 { $set: { status: "recovered", recovered_at: now, updated_at: now } },
             );
         },
-    }).catch((error) => {
+      }).catch((error) => {
         logError("Kafka ingestion consumer failed", {
             err: error instanceof Error ? error.message : String(error),
         });
         process.exit(1);
-    });
+      });
+    }
 
     server.addService(hazardPackage.Aggregate.service, {
         aggregateEvent,
@@ -721,8 +725,9 @@ async function main () {
             ready = true;
             logInfo("Aggregate Service started", {
                 instance_id: hostname(),
+                mode: service.mode,
                 grpc_port: port,
-                kafka_in_topic: kafka.inTopic,
+                kafka_in_topic: runIngester ? kafka.inTopic : undefined,
                 kafka_out_topic: kafka.outTopic,
             });
         }

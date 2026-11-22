@@ -31,6 +31,9 @@ const producer: Producer = kafka.producer({
 });
 const consumer: Consumer = kafka.consumer({ groupId: kafkaConfig.groupId });
 let consumerReady = false;
+let producerConnected = false;
+let consumerConnected = false;
+let producerConnecting: Promise<void> | undefined;
 
 consumer.on(consumer.events.GROUP_JOIN, () => { consumerReady = true; });
 consumer.on(consumer.events.CRASH, () => { consumerReady = false; });
@@ -41,27 +44,39 @@ export function isKafkaReady(): boolean {
   return consumerReady;
 }
 
+export async function ensureProducerConnected(): Promise<void> {
+  if (producerConnected) return;
+  if (!producerConnecting) {
+    producerConnecting = producer.connect().then(() => {
+      producerConnected = true;
+    }).finally(() => {
+      producerConnecting = undefined;
+    });
+  }
+  await producerConnecting;
+}
+
 export async function stopIngestConsumer(): Promise<void> {
   consumerReady = false;
-  await consumer.stop();
+  if (consumerConnected) await consumer.stop();
 }
 
 export async function connectKafka(): Promise<void> {
-  await producer.connect();
-  await consumer.connect();
+  await ensureProducerConnected();
+  if (!consumerConnected) {
+    await consumer.connect();
+    consumerConnected = true;
+  }
   await consumer.subscribe({ topic: kafkaConfig.inTopic, fromBeginning: true });
-  await consumer.subscribe({ topic: kafkaConfig.fieldReportsTopic, fromBeginning: true });
-  await consumer.subscribe({ topic: kafkaConfig.dlqTopic, fromBeginning: true });
-  await consumer.subscribe({ topic: kafkaConfig.retryTopic, fromBeginning: true });
+  const topics = [kafkaConfig.inTopic];
+  if (kafkaConfig.subscribeAuxiliaryTopics) {
+    await consumer.subscribe({ topic: kafkaConfig.fieldReportsTopic, fromBeginning: true });
+    await consumer.subscribe({ topic: kafkaConfig.dlqTopic, fromBeginning: true });
+    await consumer.subscribe({ topic: kafkaConfig.retryTopic, fromBeginning: true });
+    topics.push(kafkaConfig.fieldReportsTopic, kafkaConfig.dlqTopic, kafkaConfig.retryTopic);
+  }
   logInfo("Kafka producer connected", { brokers: kafkaConfig.brokers });
-  logInfo("Kafka consumer listening", {
-    topics: [
-      kafkaConfig.inTopic,
-      kafkaConfig.fieldReportsTopic,
-      kafkaConfig.dlqTopic,
-      kafkaConfig.retryTopic,
-    ],
-  });
+  logInfo("Kafka consumer listening", { topics });
 }
 
 export interface IngestConsumerHandlers {
@@ -239,6 +254,7 @@ export async function runIngestConsumer(
 }
 
 export async function publishFieldReport(event: Record<string, unknown>): Promise<void> {
+  await ensureProducerConnected();
   const key = String(event.source_ref_id ?? event.hazard_id ?? "");
   await producer.send({
     topic: kafkaConfig.fieldReportsTopic,
@@ -286,6 +302,7 @@ export async function publishHazard(
     },
     async (span) => {
       try {
+        await ensureProducerConnected();
         const baseMessage = createHazardKafkaMessage(hazard);
         const messageWithHeaders: Message = {
           ...baseMessage,
@@ -294,8 +311,20 @@ export async function publishHazard(
 
         await producer.send({
           topic: kafkaConfig.outTopic,
+          acks: -1,
           messages: [messageWithHeaders],
         });
+
+        const attributes = hazard.attributes as Record<string, unknown> | undefined;
+        const isCriticalCoastal = hazard.source === "SENSOR_PANTAI" &&
+          hazard.hazard_type === "COASTAL" && attributes?.critical === true;
+        if (isCriticalCoastal) {
+          await producer.send({
+            topic: kafkaConfig.criticalTopic,
+            acks: -1,
+            messages: [messageWithHeaders],
+          });
+        }
 
         const durationMs = performance.now() - start;
         recordKafkaPublish(
@@ -329,6 +358,12 @@ export async function publishHazard(
 }
 
 export async function disconnectKafka(): Promise<void> {
-  await consumer.disconnect();
-  await producer.disconnect();
+  if (consumerConnected) {
+    await consumer.disconnect();
+    consumerConnected = false;
+  }
+  if (producerConnected) {
+    await producer.disconnect();
+    producerConnected = false;
+  }
 }
