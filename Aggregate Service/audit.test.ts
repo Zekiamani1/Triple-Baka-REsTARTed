@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import {
+  buildShardLocations,
   computeByteOrderChecksum,
   decodeCursor,
   encodeCursor,
@@ -49,4 +50,39 @@ test("unwrapAttributes converts protobuf Struct fields to plain object", () => {
     tsunami: true,
     note: "ok",
   });
+});
+
+test("buildShardLocations resolves live primary, unique replica units, and fallback", () => {
+  const hosts = [
+    "mongo-shard-1.mongo-shard-1.ns.svc:27018",
+    "mongo-shard-1-replica-2:27018",
+    "mongo-shard-1-replica-3:27018",
+  ];
+  const podToNode = new Map<string, string>([
+    ["mongo-shard-1", "worker-1"],
+    ["mongo-shard-1-replica-2", "worker-2"],
+    ["mongo-shard-1-replica-3", "worker-3"],
+  ]);
+
+  // Simulated failover where replica-2 became the active primary.
+  const failover = buildShardLocations("shard1RS", hosts, "mongo-shard-1-replica-2:27018", podToNode);
+  assert.deepEqual(failover, [
+    { node: "worker-2", unit: "shard1RS", role: "primary" },
+    { node: "worker-1", unit: "shard1RS-r1", role: "replica" },
+    { node: "worker-3", unit: "shard1RS-r2", role: "replica" },
+  ]);
+
+  // Hostname-only match (without port).
+  const hostOnlyMatch = buildShardLocations("shard1RS", hosts, "mongo-shard-1-replica-3", podToNode);
+  assert.equal(hostOnlyMatch[0].node, "worker-3");
+  assert.equal(hostOnlyMatch[0].unit, "shard1RS");
+  assert.equal(hostOnlyMatch[0].role, "primary");
+
+  // Null fallback uses index 0 as primary and preserves distinct replica unit names.
+  const fallback = buildShardLocations("shard2RS", hosts, null, podToNode);
+  assert.deepEqual(fallback, [
+    { node: "worker-1", unit: "shard2RS", role: "primary" },
+    { node: "worker-2", unit: "shard2RS-r1", role: "replica" },
+    { node: "worker-3", unit: "shard2RS-r2", role: "replica" },
+  ]);
 });

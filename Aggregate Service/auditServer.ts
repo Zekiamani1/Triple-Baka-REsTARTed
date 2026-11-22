@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Collection, Db, MongoClient } from "mongodb";
+import { MongoClient, type Collection, type Db } from "mongodb";
 import { queryWithPartialFallback } from "./partialQuery";
 import type { UnprocessedMessageDoc } from "./dlqAndFieldReports";
 
@@ -104,6 +104,106 @@ async function getPodToNodeMap(): Promise<Map<string, string>> {
 
   podNodeCache = { expiresAt: now + 5000, map };
   return map;
+}
+
+export interface ShardLocation {
+  node: string;
+  unit: string;
+  role: "primary" | "replica";
+}
+
+export function buildShardLocations(
+  shardId: string,
+  hosts: string[],
+  primaryHost: string | null,
+  podToNode: Map<string, string>,
+): ShardLocation[] {
+  const cleanHosts = hosts.map((h) => h.trim()).filter(Boolean);
+  if (cleanHosts.length === 0) return [];
+
+  const norm = (v: string) => v.trim().toLowerCase();
+  const primaryNorm = primaryHost ? norm(primaryHost) : null;
+  const primaryHostname = primaryNorm ? primaryNorm.split(":")[0] : null;
+
+  let primaryIdx = -1;
+  if (primaryNorm) {
+    primaryIdx = cleanHosts.findIndex((h) => norm(h) === primaryNorm);
+    if (primaryIdx === -1 && primaryHostname) {
+      primaryIdx = cleanHosts.findIndex((h) => norm(h).split(":")[0] === primaryHostname);
+    }
+  }
+  if (primaryIdx === -1) primaryIdx = 0;
+
+  const nodeForHost = (h: string): string => {
+    const hostOnly = h.split(":")[0];
+    const podName = hostOnly.split(".")[0];
+    return podToNode.get(podName) ?? hostOnly;
+  };
+
+  const primary = cleanHosts[primaryIdx];
+  const locations: ShardLocation[] = [
+    { node: nodeForHost(primary), unit: shardId, role: "primary" },
+  ];
+  let replicaNum = 1;
+  for (let i = 0; i < cleanHosts.length; i++) {
+    if (i === primaryIdx) continue;
+    locations.push({
+      node: nodeForHost(cleanHosts[i]),
+      unit: `${shardId}-r${replicaNum++}`,
+      role: "replica",
+    });
+  }
+  return locations;
+}
+
+async function resolveShardPrimaryHost(
+  mongoClient: MongoClient,
+  hostStr: string,
+): Promise<string | null> {
+  const hostsPart = hostStr.includes("/") ? hostStr.split("/")[1] : hostStr;
+  const hosts = hostsPart ? hostsPart.split(",").map((h) => h.trim()).filter(Boolean) : [];
+  const credentials = mongoClient.options.credentials;
+
+  for (const host of hosts) {
+    const probeClient = new MongoClient(`mongodb://${host}/`, {
+      auth: credentials
+        ? { username: credentials.username, password: credentials.password }
+        : undefined,
+      authSource: credentials?.source,
+      authMechanism: credentials?.mechanism,
+      authMechanismProperties: credentials?.mechanismProperties,
+      tls: mongoClient.options.tls,
+      tlsCAFile: mongoClient.options.tlsCAFile,
+      tlsCertificateKeyFile: mongoClient.options.tlsCertificateKeyFile,
+      tlsCertificateKeyFilePassword: (mongoClient.options as { tlsCertificateKeyFilePassword?: string }).tlsCertificateKeyFilePassword,
+      tlsAllowInvalidCertificates: mongoClient.options.tlsAllowInvalidCertificates,
+      tlsAllowInvalidHostnames: mongoClient.options.tlsAllowInvalidHostnames,
+      tlsInsecure: mongoClient.options.tlsInsecure,
+      directConnection: true,
+      serverSelectionTimeoutMS: 1200,
+      connectTimeoutMS: 1200,
+      socketTimeoutMS: 1500,
+    });
+    try {
+      let res: Record<string, unknown>;
+      try {
+        res = await probeClient.db("admin").command({ hello: 1 });
+      } catch {
+        res = await probeClient.db("admin").command({ isMaster: 1 });
+      }
+      if (typeof res.primary === "string" && res.primary.trim().length > 0) {
+        return res.primary.trim();
+      }
+      if (res.isWritablePrimary === true || res.ismaster === true) {
+        return host;
+      }
+    } catch {
+      // Try next member if this node is unreachable.
+    } finally {
+      await probeClient.close().catch(() => undefined);
+    }
+  }
+  return null;
 }
 
 export async function handleAuditRoute(
@@ -278,19 +378,13 @@ export async function handleAuditRoute(
     const shardDoc = await configDb.collection("shards").findOne({ _id: shardId as any });
     const hostStr = String(shardDoc?.host ?? "");
     const hostsPart = hostStr.includes("/") ? hostStr.split("/")[1] : hostStr;
-    const hosts = hostsPart ? hostsPart.split(",") : [];
-    const podToNode = await getPodToNodeMap();
+    const hosts = hostsPart ? hostsPart.split(",").map((h) => h.trim()).filter(Boolean) : [];
+    const [podToNode, primaryHost] = await Promise.all([
+      getPodToNodeMap(),
+      hosts.length > 0 ? resolveShardPrimaryHost(deps.mongoClient, hostStr) : Promise.resolve(null),
+    ]);
 
-    const locations = hosts.map((h, idx) => {
-      const hostOnly = h.split(":")[0];
-      const podName = hostOnly.split(".")[0];
-      const node = podToNode.get(podName) ?? hostOnly;
-      return {
-        node,
-        unit: shardId,
-        role: idx === 0 ? "primary" : "replica",
-      };
-    });
+    const locations = buildShardLocations(shardId, hosts, primaryHost, podToNode);
 
     sendJson(res, 200, {
       hazard_id: hazardId,

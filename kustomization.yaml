@@ -39,6 +39,8 @@ secretGenerator:
   - name: audit-secret
     envs:
       - .env.example
+    options:
+      disableNameSuffixHash: true
   - name: alert-consumer-env
     envs:
       - Alert Consumer/.env

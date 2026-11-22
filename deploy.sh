@@ -74,6 +74,17 @@ ensure_random_secret field-receiver-token token
 echo "Applying Kustomize manifests to namespace $NS..."
 kubectl apply -k .
 
+if [[ -n "${AUDIT_API_TOKEN:-}" ]]; then
+  echo "Applying AUDIT_API_TOKEN override to Secret/audit-secret..."
+  kubectl create secret generic audit-secret \
+    --namespace "$NS" \
+    --from-literal="AUDIT_API_TOKEN=$AUDIT_API_TOKEN" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  kubectl rollout restart deploy/aggregate deploy/aggregate-ingester -n "$NS"
+else
+  echo "Notice: audit-secret uses the default token from .env.example (set AUDIT_API_TOKEN to override)."
+fi
+
 echo "Waiting for deployments and statefulsets..."
 kubectl rollout status statefulset/auth-db -n "$NS" --timeout=300s
 kubectl rollout status deploy/kafka-aggregate -n "$NS" --timeout=300s
