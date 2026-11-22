@@ -157,7 +157,9 @@ services:
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-ingest --partitions 12 --replication-factor 1 &&
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic field-reports-ingest --partitions 12 --replication-factor 1 &&
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-dlq --partitions 3 --replication-factor 1 &&
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-retry --partitions 3 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-retry --partitions 3 --replication-factor 1 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic pantai-quarantine --partitions 3 --replication-factor 1 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-critical --partitions 3 --replication-factor 1
   aggregate:
     build: 
         context: "./Aggregate Service"
@@ -190,43 +192,6 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "grpcurl -plaintext -import-path /app -proto health.proto -d '{\"service\":\"\"}' localhost:$${AGGREGATOR_PORT} grpc.health.v1.Health/Check | grep -q '\"SERVING\"'"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-  kafka-init-pantai:
-    image: apache/kafka:latest
-    depends_on:
-      kafka-aggregate:
-        condition: service_healthy
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - |
-        for topic in pantai-ingest pantai-quarantine hazard-critical; do
-          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic "$$topic" --partitions 3 --replication-factor 1
-        done
-  aggregate-pantai:
-    build: "./Aggregate Service"
-    env_file: "./Aggregate Service/.env"
-    environment:
-      KAFKA_BROKERS: kafka-aggregate:29092
-      KAFKA_CLIENT_ID: aggregate-pantai
-      KAFKA_CONSUMER_GROUP: aggregate-pantai-ingestion
-      KAFKA_TOPIC_HAZARD_INGEST: pantai-ingest
-      KAFKA_TOPIC_HAZARD_EVENTS: hazard-events
-      KAFKA_SUBSCRIBE_AUXILIARY_TOPICS: "false"
-      KAFKA_EXPECTED_SOURCE: SENSOR_PANTAI
-      AGGREGATE_MODE: ingester
-      AGGREGATOR_PORT: "50051"
-    depends_on:
-      mongo-aggregate:
-        condition: service_started
-      kafka-init:
-        condition: service_completed_successfully
-      kafka-init-pantai:
-        condition: service_completed_successfully
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "grpcurl -plaintext -proto /app/health.proto -d '{\"service\":\"\"}' localhost:50051 grpc.health.v1.Health/Check | grep -q '\"SERVING\"'"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -263,11 +228,16 @@ services:
       context: "./Poller Service/BMKG Poller Service"
       network: host
     env_file: "./Poller Service/BMKG Poller Service/.env"
+    environment:
+      AGGREGATE_INTERNAL_URL: http://aggregate-http:50052
+      AUDIT_API_TOKEN: ${AUDIT_API_TOKEN:-dev-audit-token}
     depends_on:
       bmkg:
         condition: service_healthy
       kafka-init-ingest:
         condition: service_completed_successfully
+      aggregate:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8085/health >/dev/null 2>&1"]
       interval: 5s
@@ -279,11 +249,16 @@ services:
       context: "./Poller Service/PVMBG Poller Service"
       network: host
     env_file: "./Poller Service/PVMBG Poller Service/.env"
+    environment:
+      AGGREGATE_INTERNAL_URL: http://aggregate-http:50052
+      AUDIT_API_TOKEN: ${AUDIT_API_TOKEN:-dev-audit-token}
     depends_on:
       pvmbg:
         condition: service_healthy
       kafka-init-ingest:
         condition: service_completed_successfully
+      aggregate:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8086/health >/dev/null 2>&1"]
       interval: 5s

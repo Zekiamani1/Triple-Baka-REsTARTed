@@ -18,7 +18,6 @@ spec:
                   - aggregate
                   - aggregate-api
                   - aggregate-ingester
-                  - aggregate-pantai
                   - coastal-adapter
                   - field-receiver
                   - mongo-cluster-init

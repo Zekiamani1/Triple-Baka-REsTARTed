@@ -167,13 +167,13 @@ async function trackMongoOp<T = any>(operation: string, fn: () => Promise<T>): P
     }
 }
 
-async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean }): Promise<void> {
+async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean; requireFence?: boolean; fence?: { source: string; instanceId: string; token: number } }): Promise<boolean> {
     const start = performance.now();
     const source = String(hazardEvent?.source ?? "UNKNOWN");
     const hazardType = String(hazardEvent?.hazard_type ?? "UNKNOWN");
     const severity = String(hazardEvent?.severity ?? "UNKNOWN");
 
-    await trace.getTracer(SCOPE_NAME).startActiveSpan(
+    return await trace.getTracer(SCOPE_NAME).startActiveSpan(
         "AggregateService.ingestHazard",
         {
             kind: SpanKind.INTERNAL,
@@ -223,10 +223,30 @@ async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean }): Prom
                 let eventToPublish = hazardEvent;
 
                 try {
-                    await trackMongoOp("insertOne", () =>
-                        collection.insertOne({ ...hazardEvent, ...identity, published: false }),
-                    );
+                    if (opts?.requireFence && ["BMKG", "PVMBG"].includes(String(hazardEvent.source))) {
+                        const fence = opts.fence;
+                        if (!fence || fence.source !== hazardEvent.source) return false;
+                        const session = mongoClient.startSession();
+                        try {
+                            await session.withTransaction(async () => {
+                                const leaseWrite = await mongoClient.db(mongo.dbName).collection("_poller_leases").updateOne(
+                                    { _id: fence.source, owner_id: fence.instanceId, fencing_token: fence.token, $expr: { $gt: ["$expires_at", "$$NOW"] } },
+                                    { $inc: { accepted_events: 1 } },
+                                    { session },
+                                );
+                                if (leaseWrite.matchedCount !== 1) throw new Error("stale poller fencing token");
+                                await collection.insertOne({ ...hazardEvent, ...identity, published: false }, { session });
+                            });
+                        } finally {
+                            await session.endSession();
+                        }
+                    } else {
+                        await trackMongoOp("insertOne", () =>
+                            collection.insertOne({ ...hazardEvent, ...identity, published: false }),
+                        );
+                    }
                 } catch (error: any) {
+                    if (error instanceof Error && error.message === "stale poller fencing token") return false;
                     if (error?.code !== 11000) {
                         throw error;
                     }
@@ -242,7 +262,7 @@ async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean }): Prom
                         span.setAttribute("hazard.duplicate", true);
                         recordIngestEvent(source, hazardType, severity, "duplicate", performance.now() - start);
                         span.setStatus({ code: SpanStatusCode.OK });
-                        return;
+                        return true;
                     }
 
                     if (!existingEvent) {
@@ -285,6 +305,7 @@ async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean }): Prom
                     source_ref_id: eventToPublish.source_ref_id,
                     hazard_id: eventToPublish.hazard_id,
                 });
+                return true;
             } catch (error: any) {
                 recordIngestEvent(source, hazardType, severity, "error", performance.now() - start);
                 logError("failed to ingest hazard event", {
@@ -617,14 +638,14 @@ async function main () {
         dbName: mongo.dbName,
         collectionName: mongo.collection,
         unprocessedCol,
-        ingestHazard,
+        ingestHazard: async (event, opts) => { await ingestHazard(event, opts); },
         publishFieldReport,
     });
     const runIngester = service.mode === "ingester" || service.mode === "all";
     if (runIngester) {
       await connectKafka();
       void runIngestConsumer({
-        onHazard: (hazard) => ingestHazard(hazard),
+        onHazard: (hazard, fence) => ingestHazard(hazard, { requireFence: true, fence }),
         onDlqMessage: async (dlq) => {
             await parkUnprocessedMessage(unprocessedCol, {
                 message_id: typeof dlq.message_id === "string" ? dlq.message_id : undefined,

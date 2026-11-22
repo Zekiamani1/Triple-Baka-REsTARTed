@@ -78,7 +78,7 @@ func LoadConfig() (Config, error) {
 
 	cfg.KafkaTopicPantaiIngest = envOrDefault(
 		"KAFKA_TOPIC_PANTAI_INGEST",
-		"pantai-ingest",
+		"hazard-ingest",
 	)
 	if err := validateKafkaTopic("KAFKA_TOPIC_PANTAI_INGEST", cfg.KafkaTopicPantaiIngest); err != nil {
 		return Config{}, err

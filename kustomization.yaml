@@ -88,7 +88,7 @@ configMapGenerator:
       - BREAKER_FAILURE_THRESHOLD=3
       - BREAKER_OPEN_MS=10000
       - KAFKA_BROKERS=kafka-aggregate:29092
-      - KAFKA_TOPIC_PANTAI_INGEST=pantai-ingest
+      - KAFKA_TOPIC_PANTAI_INGEST=hazard-ingest
       - KAFKA_TOPIC_PANTAI_QUARANTINE=pantai-quarantine
       - HEALTH_PORT=8089
       - OTEL_SERVICE_NAME=coastal-poller

@@ -102,6 +102,7 @@ spec:
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-ingest --partitions 12 --replication-factor 3 --config min.insync.replicas=2
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --alter --topic hazard-ingest --partitions 12 >/dev/null 2>&1 || true
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic field-reports-ingest --partitions 12 --replication-factor 3 --config min.insync.replicas=2
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic pantai-quarantine --partitions 3 --replication-factor 3 --config min.insync.replicas=2
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-dlq --partitions 3 --replication-factor 3 --config min.insync.replicas=2
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-retry --partitions 3 --replication-factor 3 --config min.insync.replicas=2
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-critical --partitions 12 --replication-factor 3 --config min.insync.replicas=2
@@ -130,6 +131,14 @@ spec:
     spec:
       serviceAccountName: aggregate-reader
       terminationGracePeriodSeconds: 40
+      topologySpreadConstraints:
+        - maxSkew: 1
+          minDomains: 2
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: aggregate
       initContainers:
         - name: wait-for-mongo
           image: percona/percona-server-mongodb:8.0.4-1-multi
@@ -295,7 +304,7 @@ metadata:
   labels:
     app: bmkg-poller
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
       app: bmkg-poller
@@ -305,6 +314,14 @@ spec:
         app: bmkg-poller
         role: aggregator
     spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          minDomains: 2
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: bmkg-poller
       containers:
         - name: bmkg-poller
           image: triple-baka-restarted-bmkg-poller:latest
@@ -320,6 +337,11 @@ spec:
           envFrom:
             - secretRef:
                 name: bmkg-poller-env
+            - secretRef:
+                name: audit-secret
+          env:
+            - name: AGGREGATE_INTERNAL_URL
+              value: http://aggregate-http:50052
           readinessProbe:
             httpGet:
               path: /health
@@ -344,7 +366,7 @@ metadata:
   labels:
     app: pvmbg-poller
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
       app: pvmbg-poller
@@ -354,6 +376,14 @@ spec:
         app: pvmbg-poller
         role: aggregator
     spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          minDomains: 2
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: pvmbg-poller
       containers:
         - name: pvmbg-poller
           image: triple-baka-restarted-pvmbg-poller:latest
@@ -369,6 +399,11 @@ spec:
           envFrom:
             - secretRef:
                 name: pvmbg-poller-env
+            - secretRef:
+                name: audit-secret
+          env:
+            - name: AGGREGATE_INTERNAL_URL
+              value: http://aggregate-http:50052
           readinessProbe:
             httpGet:
               path: /health

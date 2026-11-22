@@ -80,7 +80,7 @@ export async function connectKafka(): Promise<void> {
 }
 
 export interface IngestConsumerHandlers {
-  onHazard: (hazard: Record<string, unknown>) => Promise<void>;
+  onHazard: (hazard: Record<string, unknown>, fence?: { source: string; instanceId: string; token: number }) => Promise<void | boolean>;
   onDlqMessage?: (dlq: Record<string, unknown>) => Promise<void>;
   onPoisonPill?: (info: {
     topic: string;
@@ -175,6 +175,16 @@ export async function runIngestConsumer(
             const isRetryTopic = topic === kafkaConfig.retryTopic;
             const retryMeta = isRetryTopic ? (payload as { _retry_attempts?: number; _dlq_message_id?: string; hazard?: Record<string, unknown> }) : null;
             const hazard = isRetryTopic && retryMeta?.hazard ? retryMeta.hazard : payload;
+            const headerValue = (name: string): string => {
+              const value = message.headers?.[name];
+              return Array.isArray(value) ? String(value[0] ?? "") : Buffer.isBuffer(value) ? value.toString("utf8") : String(value ?? "");
+            };
+            const fenceSource = headerValue("x-poller-source");
+            const fenceInstance = headerValue("x-poller-instance");
+            const fenceToken = Number(headerValue("x-fencing-token"));
+            const fence = fenceSource && fenceInstance && Number.isSafeInteger(fenceToken) && fenceToken > 0
+              ? { source: fenceSource, instanceId: fenceInstance, token: fenceToken }
+              : undefined;
             const attempts = isRetryTopic ? Number(retryMeta?._retry_attempts ?? 1) : 0;
 
             if (isRetryTopic && attempts > 0) {
@@ -193,7 +203,13 @@ export async function runIngestConsumer(
             });
 
             try {
-              await handlers.onHazard(hazard);
+              const accepted = await handlers.onHazard(hazard, fence);
+              if (accepted === false) {
+                recordKafkaConsumed(topic, "stale_fence");
+                logWarn("stale poller event ignored", { topic, source: fenceSource, instance_id: fenceInstance, fencing_token: fenceToken });
+                span.setStatus({ code: SpanStatusCode.OK });
+                return;
+              }
               if (isRetryTopic && retryMeta?._dlq_message_id && handlers.onRetryRecovered) {
                 await handlers.onRetryRecovered(retryMeta._dlq_message_id);
               }
@@ -226,6 +242,11 @@ export async function runIngestConsumer(
                           _retry_attempts: nextAttempts,
                           hazard,
                         }),
+                        headers: fence ? {
+                          "x-poller-source": fence.source,
+                          "x-poller-instance": fence.instanceId,
+                          "x-fencing-token": String(fence.token),
+                        } : undefined,
                       },
                     ],
                   });
