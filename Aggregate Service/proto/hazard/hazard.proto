@@ -68,6 +68,20 @@ message ListHazardsRequest {
 }
 
 message ListHazardsResponse {
-  repeated Hazard hazards = 1;
-  int32 total = 2;
+    repeated Hazard hazards = 1;
+    int32 total = 2;
+
+    SensorPantaiStatus sensor_pantai_status = 3;
+}
+enum DataStatus {
+    DATA_STATUS_UNSPECIFIED = 0;
+    DATA_STATUS_FRESH = 1;
+    DATA_STATUS_STALE = 2;
+    DATA_STATUS_UNAVAILABLE = 3;
+}
+
+message SensorPantaiStatus {
+    DataStatus data_status = 1;
+    google.protobuf.Timestamp last_success_at = 2;
+    google.protobuf.Timestamp latest_observed_at = 3;
 }
