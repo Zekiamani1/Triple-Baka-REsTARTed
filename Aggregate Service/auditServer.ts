@@ -174,7 +174,11 @@ export async function handleAuditRoute(
       deps.collectionName,
       (col, opts) =>
         col
-          .find(filter, { allowPartialResults: opts.allowPartialResults, maxTimeMS: opts.maxTimeMS })
+        .find(filter, {
+          allowPartialResults: opts.allowPartialResults,
+          maxTimeMS: opts.maxTimeMS,
+          comment: opts.comment,
+        })
           .sort({ ingested_at: 1, hazard_id: 1 })
           .limit(limit + 1)
           .toArray(),
@@ -223,8 +227,10 @@ export async function handleAuditRoute(
             projection: { _id: 0, source_ref_id: 1 },
             allowPartialResults: opts.allowPartialResults,
             maxTimeMS: opts.maxTimeMS,
+          comment: opts.comment,
           })
           .toArray(),
+      () => [],
     );
 
     const refIds = result.data.map((d: any) => String(d.source_ref_id ?? ""));

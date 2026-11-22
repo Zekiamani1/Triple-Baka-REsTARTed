@@ -81,6 +81,7 @@ spec:
         type: ClusterIP
       volumeSpec:
         persistentVolumeClaim:
+          storageClassName: local-path
           resources:
             requests:
               storage: 1Gi
@@ -145,6 +146,7 @@ spec:
         type: ClusterIP
       volumeSpec:
         persistentVolumeClaim:
+          storageClassName: local-path
           resources:
             requests:
               storage: 1Gi
@@ -182,6 +184,7 @@ spec:
         type: ClusterIP
       volumeSpec:
         persistentVolumeClaim:
+          storageClassName: local-path
           resources:
             requests:
               storage: 1Gi

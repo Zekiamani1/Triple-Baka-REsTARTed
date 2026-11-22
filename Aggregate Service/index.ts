@@ -62,6 +62,7 @@ const proto = grpc.loadPackageDefinition(packageDefinition) as any;
 const healthProto = grpc.loadPackageDefinition(healthPackageDefinition) as any;
 
 const mongoClient = new MongoClient(mongo.uri, {
+    monitorCommands: true,
     retryWrites: true,
     writeConcern: { w: "majority", journal: true, wtimeoutMS: 10000 },
     readConcern: { level: "local" },
@@ -371,7 +372,11 @@ async function fetchListHazardsPayload(
             const [hazards, total] = await Promise.all([
                 trackMongoOp("find", () =>
                     col
-                        .find(filter, { allowPartialResults: opts.allowPartialResults, maxTimeMS: opts.maxTimeMS })
+                        .find(filter, {
+                            allowPartialResults: opts.allowPartialResults,
+                            maxTimeMS: opts.maxTimeMS,
+                            comment: opts.comment,
+                        })
                         .project({
                             _id: 0,
                             hazard_id: 1,
@@ -399,6 +404,7 @@ async function fetchListHazardsPayload(
             ]);
             return { hazards, total };
         },
+        () => ({ hazards: [], total: 0 }),
     );
 
     const hazards = partialRes.data?.hazards ?? [];

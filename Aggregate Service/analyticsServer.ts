@@ -84,8 +84,10 @@ export async function handleAnalyticsRoute(
           },
           allowPartialResults: opts.allowPartialResults,
           maxTimeMS: opts.maxTimeMS,
+          comment: opts.comment,
         })
         .toArray(),
+    () => [],
   );
 
   const interval = pickInterval(fromDate, toDate, intervalParam);
