@@ -212,7 +212,7 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        for topic in pantai-ingest pantai-quarantine; do
+        for topic in pantai-ingest pantai-quarantine hazard-critical; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic "$$topic" --partitions 3 --replication-factor 1
         done
   aggregate-pantai:
@@ -224,7 +224,9 @@ services:
       KAFKA_CONSUMER_GROUP: aggregate-pantai-ingestion
       KAFKA_TOPIC_HAZARD_INGEST: pantai-ingest
       KAFKA_TOPIC_HAZARD_EVENTS: hazard-events
+      KAFKA_SUBSCRIBE_AUXILIARY_TOPICS: "false"
       KAFKA_EXPECTED_SOURCE: SENSOR_PANTAI
+      AGGREGATE_MODE: ingester
       AGGREGATOR_PORT: "50051"
     depends_on:
       mongo-aggregate:

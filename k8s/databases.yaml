@@ -22,6 +22,23 @@ spec:
     setFCV: false
   secrets:
     users: mongo-cluster-secrets
+  users:
+    - name: pantai-adapter
+      db: coastal_adapter
+      passwordSecretRef:
+        name: pantai-adapter-db
+        key: password
+      roles:
+        - name: readWrite
+          db: coastal_adapter
+    - name: field-receiver
+      db: field_receiver
+      passwordSecretRef:
+        name: field-receiver-db
+        key: password
+      roles:
+        - name: readWrite
+          db: field_receiver
   pmm:
     enabled: false
     image: percona/pmm-client:2.44.0

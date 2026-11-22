@@ -129,7 +129,7 @@ metadata:
 spec:
   type: ClusterIP
   selector:
-    app: aggregate
+    app: aggregate-api
   ports:
     - name: http
       port: 50052

@@ -184,6 +184,8 @@ spec:
           env:
             - name: AGGREGATE_MODE
               value: "api"
+            - name: SENSOR_PANTAI_STATUS_URL
+              value: "http://coastal-adapter:8089/internal/source-status"
             - name: NODE_OPTIONS
               value: "--max-old-space-size=512"
             - name: MONGO_URI
@@ -460,7 +462,7 @@ metadata:
   labels:
     app: alert-consumer
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: alert-consumer
@@ -470,6 +472,32 @@ spec:
         app: alert-consumer
         role: consumer
     spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: alert-consumer
+      initContainers:
+        - name: wait-for-critical-topic
+          image: apache/kafka:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --describe --topic hazard-critical >/dev/null 2>&1; do
+                echo "Waiting for hazard-critical topic..."
+                sleep 3
+              done
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
       containers:
         - name: alert-consumer
           image: triple-baka-restarted-alert-consumer:latest
@@ -477,6 +505,11 @@ spec:
           env:
             - name: NODE_OPTIONS
               value: "--max-old-space-size=192"
+            - name: FIELD_RECEIVER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: field-receiver-token
+                  key: token
           ports:
             - containerPort: 8088
               name: health

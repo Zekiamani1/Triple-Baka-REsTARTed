@@ -15,6 +15,8 @@ export const kafka = {
   inTopic: required('KAFKA_TOPIC_HAZARD_INGEST', 'hazard-ingest'),
   expectedSource: process.env.KAFKA_EXPECTED_SOURCE?.trim() || undefined,
   outTopic: required('KAFKA_TOPIC_HAZARD_EVENTS', 'hazard-events'),
+  criticalTopic: required('KAFKA_TOPIC_HAZARD_CRITICAL', 'hazard-critical'),
+  subscribeAuxiliaryTopics: (process.env.KAFKA_SUBSCRIBE_AUXILIARY_TOPICS ?? 'true').toLowerCase() === 'true',
   fieldReportsTopic: required('KAFKA_TOPIC_FIELD_REPORTS', 'field-reports-ingest'),
   dlqTopic: required('KAFKA_TOPIC_HAZARD_DLQ', 'hazard-dlq'),
   retryTopic: required('KAFKA_TOPIC_HAZARD_RETRY', 'hazard-retry'),

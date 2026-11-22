@@ -13,6 +13,9 @@ resources:
   - k8s/network-policies.yaml
   - k8s/rbac-audit.yaml
   - k8s/analytics.yaml
+  - k8s/sensor-pantai.yaml
+  - k8s/pantai-state.yaml
+  - k8s/pantai.yaml
 
 secretGenerator:
   - name: auth-env
@@ -54,6 +57,8 @@ configMapGenerator:
   - name: aggregate-env
     envs:
       - Aggregate Service/.env
+    literals:
+      - SENSOR_PANTAI_STATUS_URL=http://coastal-adapter:8089/internal/source-status
   - name: event-consumer-env
     envs:
       - Event Consumer/.env
@@ -74,3 +79,26 @@ configMapGenerator:
   - name: grafana-dashboards-json
     files:
       - infra/grafana/bnpb-overview.json
+  - name: coastal-adapter-env
+    literals:
+      - SENSOR_BASE_URL=http://sensor-pantai:8080
+      - POLL_INTERVAL_MS=1000
+      - HTTP_TIMEOUT_MS=1000
+      - BREAKER_FAILURE_THRESHOLD=3
+      - BREAKER_OPEN_MS=10000
+      - KAFKA_BROKERS=kafka-aggregate:29092
+      - KAFKA_TOPIC_PANTAI_INGEST=pantai-ingest
+      - KAFKA_TOPIC_PANTAI_QUARANTINE=pantai-quarantine
+      - HEALTH_PORT=8089
+      - OTEL_SERVICE_NAME=coastal-poller
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-lgtm:4317
+      - MAX_OBSERVATION_AGE_MS=1800000
+      - MAX_FUTURE_SKEW_MS=0
+  - name: field-receiver-env
+    literals:
+      - FIELD_RECEIVER_PORT=8090
+      - FIELD_RECEIVER_DB=field_receiver
+      - FIELD_RECEIVER_COLLECTION=notification_receipts
+      - FIELD_RECEIVER_MAX_BODY_BYTES=1048576
+      - OTEL_SERVICE_NAME=field-receiver
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-lgtm:4317

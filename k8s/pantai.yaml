@@ -1,0 +1,348 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-init-pantai
+  labels:
+    app: kafka-init-pantai
+    role: other
+spec:
+  ttlSecondsAfterFinished: 60
+  template:
+    metadata:
+      labels:
+        app: kafka-init-pantai
+        role: other
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-pantai-topics
+          image: apache/kafka:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --list >/dev/null 2>&1; do
+                echo "Waiting for kafka-aggregate..."
+                sleep 3
+              done
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic pantai-ingest --partitions 12 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic pantai-quarantine --partitions 3 --replication-factor 1
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-critical --partitions 12 --replication-factor 1
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coastal-adapter
+  labels:
+    app: coastal-adapter
+    role: aggregator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: coastal-adapter
+  template:
+    metadata:
+      labels:
+        app: coastal-adapter
+        role: aggregator
+    spec:
+      initContainers:
+        - name: wait-for-pantai-topics
+          image: apache/kafka:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --describe --topic pantai-ingest >/dev/null 2>&1; do
+                echo "Waiting for pantai-ingest topic..."
+                sleep 3
+              done
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      containers:
+        - name: coastal-adapter
+          image: triple-baka-restarted-coastal-poller:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: coastal-adapter-env
+          env:
+            - name: PANTAI_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: pantai-token
+                  key: token
+            - name: PANTAI_ADAPTER_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pantai-adapter-db
+                  key: password
+            - name: PANTAI_STATE_URI
+              value: mongodb://pantai-adapter:$(PANTAI_ADAPTER_DB_PASSWORD)@mongo-router:27017/coastal_adapter?authSource=coastal_adapter&retryWrites=true&w=majority
+          ports:
+            - containerPort: 8089
+              name: health
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8089
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8089
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coastal-adapter
+  labels:
+    app: coastal-adapter
+spec:
+  type: ClusterIP
+  selector:
+    app: coastal-adapter
+  ports:
+    - name: health
+      port: 8089
+      targetPort: 8089
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aggregate-pantai
+  labels:
+    app: aggregate-pantai
+    role: aggregator
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: aggregate-pantai
+  template:
+    metadata:
+      labels:
+        app: aggregate-pantai
+        role: aggregator
+    spec:
+      terminationGracePeriodSeconds: 40
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: aggregate-pantai
+      initContainers:
+        - name: wait-for-mongo-sharding
+          image: percona/percona-server-mongodb:8.0.4-1-multi
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: aggregate-env
+            - secretRef:
+                name: mongo-cluster-secrets
+          env:
+            - name: MONGO_URI
+              value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until mongosh "$MONGO_URI" --quiet --eval 'const dbName = process.env.MONGO_DB_NAME || "bnpb"; const colName = process.env.MONGO_COLLECTION || "hazard_events"; quit(db.getSiblingDB(dbName).getCollection("_cluster_setup").findOne({ _id: `${dbName}.${colName}`, rangesReady: true }) ? 0 : 1)' >/dev/null 2>&1; do
+                echo "Waiting for mongo-cluster-init..."
+                sleep 3
+              done
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+        - name: wait-for-pantai-topics
+          image: apache/kafka:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --describe --topic pantai-ingest >/dev/null 2>&1; do
+                echo "Waiting for pantai-ingest topic..."
+                sleep 3
+              done
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      containers:
+        - name: aggregate
+          image: triple-baka-restarted-aggregate:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: aggregate-env
+            - secretRef:
+                name: mongo-cluster-secrets
+            - secretRef:
+                name: audit-secret
+          env:
+            - name: AGGREGATE_MODE
+              value: ingester
+            - name: KAFKA_CLIENT_ID
+              value: aggregate-pantai
+            - name: KAFKA_CONSUMER_GROUP
+              value: aggregate-pantai-ingestion
+            - name: KAFKA_TOPIC_HAZARD_INGEST
+              value: pantai-ingest
+            - name: KAFKA_EXPECTED_SOURCE
+              value: SENSOR_PANTAI
+            - name: KAFKA_SUBSCRIBE_AUXILIARY_TOPICS
+              value: "false"
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=512"
+            - name: MONGO_URI
+              value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin&readPreference=secondaryPreferred
+          ports:
+            - containerPort: 50051
+              name: grpc
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 768Mi
+          readinessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 20
+          livenessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 10
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: field-receiver
+  labels:
+    app: field-receiver
+    role: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: field-receiver
+  template:
+    metadata:
+      labels:
+        app: field-receiver
+        role: api
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: field-receiver
+      containers:
+        - name: field-receiver
+          image: triple-baka-restarted-field-receiver:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: field-receiver-env
+          env:
+            - name: FIELD_RECEIVER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: field-receiver-token
+                  key: token
+            - name: FIELD_RECEIVER_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: field-receiver-db
+                  key: password
+            - name: FIELD_RECEIVER_MONGODB_URI
+              value: mongodb://field-receiver:$(FIELD_RECEIVER_DB_PASSWORD)@mongo-router:27017/field_receiver?authSource=field_receiver&retryWrites=true&w=majority
+          ports:
+            - containerPort: 8090
+              name: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8090
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: field-receiver
+  labels:
+    app: field-receiver
+spec:
+  type: ClusterIP
+  selector:
+    app: field-receiver
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090

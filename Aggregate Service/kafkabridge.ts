@@ -63,18 +63,15 @@ export async function connectKafka(): Promise<void> {
     consumerConnected = true;
   }
   await consumer.subscribe({ topic: kafkaConfig.inTopic, fromBeginning: true });
-  await consumer.subscribe({ topic: kafkaConfig.fieldReportsTopic, fromBeginning: true });
-  await consumer.subscribe({ topic: kafkaConfig.dlqTopic, fromBeginning: true });
-  await consumer.subscribe({ topic: kafkaConfig.retryTopic, fromBeginning: true });
+  const topics = [kafkaConfig.inTopic];
+  if (kafkaConfig.subscribeAuxiliaryTopics) {
+    await consumer.subscribe({ topic: kafkaConfig.fieldReportsTopic, fromBeginning: true });
+    await consumer.subscribe({ topic: kafkaConfig.dlqTopic, fromBeginning: true });
+    await consumer.subscribe({ topic: kafkaConfig.retryTopic, fromBeginning: true });
+    topics.push(kafkaConfig.fieldReportsTopic, kafkaConfig.dlqTopic, kafkaConfig.retryTopic);
+  }
   logInfo("Kafka producer connected", { brokers: kafkaConfig.brokers });
-  logInfo("Kafka consumer listening", {
-    topics: [
-      kafkaConfig.inTopic,
-      kafkaConfig.fieldReportsTopic,
-      kafkaConfig.dlqTopic,
-      kafkaConfig.retryTopic,
-    ],
-  });
+  logInfo("Kafka consumer listening", { topics });
 }
 
 export interface IngestConsumerHandlers {
@@ -308,8 +305,20 @@ export async function publishHazard(
 
         await producer.send({
           topic: kafkaConfig.outTopic,
+          acks: -1,
           messages: [messageWithHeaders],
         });
+
+        const attributes = hazard.attributes as Record<string, unknown> | undefined;
+        const isCriticalCoastal = hazard.source === "SENSOR_PANTAI" &&
+          hazard.hazard_type === "COASTAL" && attributes?.critical === true;
+        if (isCriticalCoastal) {
+          await producer.send({
+            topic: kafkaConfig.criticalTopic,
+            acks: -1,
+            messages: [messageWithHeaders],
+          });
+        }
 
         const durationMs = performance.now() - start;
         recordKafkaPublish(
