@@ -26,14 +26,15 @@ const (
 // SourceStatus stores last-known-good metadata for the Sensor Pantai source.
 // It intentionally stores metadata rather than duplicating HazardEvent data.
 type SourceStatus struct {
-	UpstreamStatus    string     `bson:"upstream_status,omitempty" json:"upstream_status,omitempty"`
-	LastSuccessAt     *time.Time `bson:"last_success_at,omitempty" json:"last_success_at,omitempty"`
-	LastDataAt        *time.Time `bson:"last_data_at,omitempty" json:"last_data_at,omitempty"`
-	LastObservationID string     `bson:"last_observation_id,omitempty" json:"last_observation_id,omitempty"`
-	DataStatus        string     `bson:"data_status,omitempty" json:"data_status,omitempty"`
-	LastFailureAt     *time.Time `bson:"last_failure_at,omitempty" json:"last_failure_at,omitempty"`
-	LastError         string     `bson:"last_error,omitempty" json:"last_error,omitempty"`
-	UpdatedAt         time.Time  `bson:"updated_at" json:"updated_at"`
+	UpstreamStatus     string     `bson:"upstream_status,omitempty" json:"upstream_status,omitempty"`
+	LastSuccessAt      *time.Time `bson:"last_success_at,omitempty" json:"last_success_at,omitempty"`
+	LastDataAt         *time.Time `bson:"last_data_at,omitempty" json:"last_data_at,omitempty"`
+	LastDataReceivedAt *time.Time `bson:"last_data_received_at,omitempty" json:"last_data_received_at,omitempty"`
+	LastObservationID  string     `bson:"last_observation_id,omitempty" json:"last_observation_id,omitempty"`
+	DataStatus         string     `bson:"data_status,omitempty" json:"data_status,omitempty"`
+	LastFailureAt      *time.Time `bson:"last_failure_at,omitempty" json:"last_failure_at,omitempty"`
+	LastError          string     `bson:"last_error,omitempty" json:"last_error,omitempty"`
+	UpdatedAt          time.Time  `bson:"updated_at" json:"updated_at"`
 }
 
 type adapterStateDocument struct {
@@ -53,6 +54,7 @@ type RetryableObservation struct {
 	Reason        string     `bson:"reason" json:"reason"`
 	Raw           []byte     `bson:"raw" json:"raw"`
 	ReceivedAt    time.Time  `bson:"received_at" json:"received_at"`
+	ReferenceAt   *time.Time `bson:"reference_at,omitempty" json:"reference_at,omitempty"`
 	NextAttemptAt time.Time  `bson:"next_attempt_at" json:"next_attempt_at"`
 	LastAttemptAt *time.Time `bson:"last_attempt_at,omitempty" json:"last_attempt_at,omitempty"`
 	Attempts      int        `bson:"attempts" json:"attempts"`
@@ -174,9 +176,9 @@ func (s *StateStore) LoadSourceStatus(ctx context.Context) (SourceStatus, error)
 // valid observation. maxDataAge must be the same explicit policy used by validation.
 func (s *StateStore) RecordSuccessfulFetch(
 	ctx context.Context, fetchedAt time.Time, lastDataAt *time.Time,
-	observationID string, maxDataAge time.Duration,
+	observationID string, sensorNow *time.Time, maxDataAge time.Duration,
 ) error {
-	return s.updateSourceState(ctx, lastDataAt, observationID, fetchedAt, maxDataAge, bson.D{
+	return s.updateSourceState(ctx, lastDataAt, observationID, fetchedAt, sensorNow, maxDataAge, bson.D{
 		{Key: "last_success_at", Value: fetchedAt.UTC()},
 		{Key: "upstream_status", Value: "available"},
 	}, true)
@@ -189,7 +191,7 @@ func (s *StateStore) RecordSourceFailure(ctx context.Context, failure error, fai
 	if failure != nil {
 		message = failure.Error()
 	}
-	return s.updateSourceState(ctx, nil, "", failedAt, maxDataAge, bson.D{
+	return s.updateSourceState(ctx, nil, "", failedAt, nil, maxDataAge, bson.D{
 		{Key: "upstream_status", Value: "unavailable"},
 		{Key: "last_failure_at", Value: failedAt.UTC()},
 		{Key: "last_error", Value: truncateString(message, 1024)},
@@ -199,7 +201,7 @@ func (s *StateStore) RecordSourceFailure(ctx context.Context, failure error, fai
 // RefreshDataStatus recomputes fresh/stale/unavailable on startup and during
 // polling. It prevents a persisted "fresh" value from remaining fresh forever.
 func (s *StateStore) RefreshDataStatus(ctx context.Context, now time.Time, maxDataAge time.Duration) error {
-	return s.updateSourceState(ctx, nil, "", now, maxDataAge, nil, false)
+	return s.updateSourceState(ctx, nil, "", now, nil, maxDataAge, nil, false)
 }
 
 // MarkDataUnavailable records that no usable last-known-good observation exists.
@@ -233,16 +235,16 @@ func (s *StateStore) RecordLastGoodObservation(
 	if observedAt.IsZero() {
 		return fmt.Errorf("observedAt must not be zero")
 	}
-	return s.updateSourceState(ctx, &observedAt, observationID, recordedAt, maxDataAge, nil, false)
+	return s.updateSourceState(ctx, &observedAt, observationID, recordedAt, nil, maxDataAge, nil, false)
 }
 
 // CommitPage atomically records the cursor and freshness metadata after every
 // item in the page has been durably published or retained for retry/quarantine.
 func (s *StateStore) CommitPage(
 	ctx context.Context, cursor string, fetchedAt time.Time, lastDataAt *time.Time,
-	observationID string, maxDataAge time.Duration,
+	observationID string, sensorNow *time.Time, maxDataAge time.Duration,
 ) error {
-	return s.updateSourceState(ctx, lastDataAt, observationID, fetchedAt, maxDataAge, bson.D{
+	return s.updateSourceState(ctx, lastDataAt, observationID, fetchedAt, sensorNow, maxDataAge, bson.D{
 		{Key: "cursor", Value: cursor},
 		{Key: "checkpoint_updated_at", Value: fetchedAt.UTC()},
 		{Key: "last_success_at", Value: fetchedAt.UTC()},
@@ -255,7 +257,7 @@ func (s *StateStore) CommitPage(
 // overwriting newer data metadata. Only the polling caller supplies a cursor.
 func (s *StateStore) updateSourceState(
 	ctx context.Context, candidate *time.Time, observationID string, now time.Time,
-	maxAge time.Duration, fields bson.D, clearError bool,
+	sensorNow *time.Time, maxAge time.Duration, fields bson.D, clearError bool,
 ) error {
 	if err := s.ensureReady(); err != nil {
 		return err
@@ -270,7 +272,9 @@ func (s *StateStore) updateSourceState(
 	}
 	if candidate != nil && !candidate.IsZero() {
 		at := literal(candidate.UTC())
+		received := literal(now.UTC())
 		previous := bson.D{{Key: "$ifNull", Value: bson.A{"$last_data_at", nil}}}
+		previousReceived := bson.D{{Key: "$ifNull", Value: bson.A{"$last_data_received_at", nil}}}
 		if strings.TrimSpace(observationID) != "" {
 			set = append(set, bson.E{Key: "last_observation_id", Value: bson.D{{Key: "$cond", Value: bson.A{
 				bson.D{{Key: "$gte", Value: bson.A{at, previous}}},
@@ -279,6 +283,19 @@ func (s *StateStore) updateSourceState(
 			}}}})
 		}
 		set = append(set, bson.E{Key: "last_data_at", Value: bson.D{{Key: "$max", Value: bson.A{previous, at}}}})
+		set = append(set, bson.E{Key: "last_data_received_at", Value: bson.D{{Key: "$max", Value: bson.A{previousReceived, received}}}})
+	}
+	receivedCutoff := bson.D{{Key: "$gte", Value: bson.A{
+		bson.D{{Key: "$ifNull", Value: bson.A{"$last_data_received_at", "$last_data_at"}}},
+		literal(now.UTC().Add(-maxAge)),
+	}}}
+	freshExpr := any(receivedCutoff)
+	if sensorNow != nil && !sensorNow.IsZero() {
+		sensorCutoff := bson.D{{Key: "$gte", Value: bson.A{
+			"$last_data_at",
+			literal(sensorNow.UTC().Add(-maxAge)),
+		}}}
+		freshExpr = bson.D{{Key: "$and", Value: bson.A{receivedCutoff, sensorCutoff}}}
 	}
 	status := bson.D{{Key: "$cond", Value: bson.A{
 		bson.D{{Key: "$eq", Value: bson.A{
@@ -286,7 +303,7 @@ func (s *StateStore) updateSourceState(
 		}}},
 		"unavailable",
 		bson.D{{Key: "$cond", Value: bson.A{
-			bson.D{{Key: "$gte", Value: bson.A{"$last_data_at", literal(now.UTC().Add(-maxAge))}}},
+			freshExpr,
 			"fresh", "stale",
 		}}},
 	}}}
@@ -311,6 +328,7 @@ func (s *StateStore) SaveRetryableObservation(
 	ctx context.Context,
 	record ObservationRecord,
 	receivedAt time.Time,
+	referenceAt time.Time,
 	correlationID string,
 ) (RetryableObservation, error) {
 	if err := s.ensureReady(); err != nil {
@@ -322,6 +340,11 @@ func (s *StateStore) SaveRetryableObservation(
 	if receivedAt.IsZero() {
 		return RetryableObservation{}, fmt.Errorf("receivedAt must not be zero")
 	}
+	var refPtr *time.Time
+	if !referenceAt.IsZero() {
+		ref := referenceAt.UTC()
+		refPtr = &ref
+	}
 	id := deterministicQuarantineID(coastalKafkaSource, string(ReasonUnknownStation), record.Raw)
 	document := RetryableObservation{
 		MessageID:     id,
@@ -330,6 +353,7 @@ func (s *StateStore) SaveRetryableObservation(
 		Reason:        string(ReasonUnknownStation),
 		Raw:           append([]byte(nil), record.Raw...),
 		ReceivedAt:    receivedAt.UTC(),
+		ReferenceAt:   refPtr,
 		NextAttemptAt: receivedAt.UTC().Add(initialRetryDelay),
 		Attempts:      0,
 	}

@@ -343,16 +343,20 @@ func (t *Telemetry) SetLastDataAt(observedAt time.Time) {
 	t.lastDataUnixNS.Store(observedAt.UTC().UnixNano())
 }
 
-func (t *Telemetry) RecordDataAge(ctx context.Context, observedAt time.Time) {
+func (t *Telemetry) RecordDataAge(ctx context.Context, observedAt, referenceTime time.Time) {
 	if t == nil || observedAt.IsZero() {
 		return
 	}
-	age := time.Since(observedAt)
+	ref := referenceTime.UTC()
+	if ref.IsZero() {
+		ref = time.Now().UTC()
+	}
+	age := ref.Sub(observedAt.UTC())
 	if age < 0 {
 		age = 0
 	}
 	t.dataAge.Record(ctx, age.Seconds())
-	t.lastDataUnixNS.Store(observedAt.UTC().UnixNano())
+	t.lastDataUnixNS.Store(time.Now().UTC().UnixNano())
 }
 
 func (t *Telemetry) RecordRetryQueued(ctx context.Context) {

@@ -139,7 +139,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load Sensor Pantai source status: %w", err)
 	}
-	if sourceStatus.LastDataAt != nil {
+	if sourceStatus.LastDataReceivedAt != nil {
+		telemetry.SetLastDataAt(*sourceStatus.LastDataReceivedAt)
+	} else if sourceStatus.LastDataAt != nil {
 		telemetry.SetLastDataAt(*sourceStatus.LastDataAt)
 	}
 
@@ -286,10 +288,25 @@ func (a *CoastalAdapter) runRecovery(ctx context.Context) {
 	}
 }
 
+const (
+	catchUpBacklogMinItems = 50
+	maxCatchUpBurst        = 250
+	maxStaleCatchUpPages   = 250
+)
+
+func observationReferenceTime(page ObservationPage, receivedAt time.Time) time.Time {
+	if page.GeneratedAt != nil && !page.GeneratedAt.IsZero() {
+		return page.GeneratedAt.UTC()
+	}
+	return receivedAt.UTC()
+}
+
 func (a *CoastalAdapter) runPolling(ctx context.Context, initialCursor string) error {
 
 	cursor := initialCursor
 	nextDelay := a.config.PollInterval
+	catchUpBurst := 0
+	consecutiveStaleCatchUp := 0
 
 	for {
 		freshnessCtx, freshnessCancel := context.WithTimeout(ctx, stateOperationTimeout)
@@ -298,8 +315,10 @@ func (a *CoastalAdapter) runPolling(ctx context.Context, initialCursor string) e
 		}
 		freshnessCancel()
 
-		newCursor, advanced, err := a.pollOnce(ctx, cursor)
+		newCursor, advanced, catchUp, suppressedStale, err := a.pollOnce(ctx, cursor, consecutiveStaleCatchUp < maxStaleCatchUpPages)
 		if err != nil {
+			catchUpBurst = 0
+			consecutiveStaleCatchUp = 0
 			if errors.Is(err, ErrCircuitOpen) {
 				a.logger.Debug("Sensor Pantai circuit is open; skipping upstream request", "error", err)
 				nextDelay = a.config.PollInterval
@@ -311,6 +330,16 @@ func (a *CoastalAdapter) runPolling(ctx context.Context, initialCursor string) e
 			if advanced {
 				cursor = newCursor
 			}
+			if suppressedStale {
+				consecutiveStaleCatchUp++
+			} else {
+				consecutiveStaleCatchUp = 0
+			}
+			if catchUp && catchUpBurst < maxCatchUpBurst {
+				catchUpBurst++
+				continue
+			}
+			catchUpBurst = 0
 			nextDelay = a.config.PollInterval
 		}
 
@@ -346,11 +375,11 @@ func nextPollBackoff(current, base, maximum time.Duration) time.Duration {
 	return next
 }
 
-func (a *CoastalAdapter) pollOnce(ctx context.Context, cursor string) (string, bool, error) {
+func (a *CoastalAdapter) pollOnce(ctx context.Context, cursor string, allowBacklogGrace bool) (string, bool, bool, bool, error) {
 	if len(a.stations) == 0 {
 		if err := a.refreshStations(ctx); err != nil {
 			a.recordSourceFailure(ctx, err)
-			return cursor, false, err
+			return cursor, false, false, false, err
 		}
 	}
 
@@ -373,18 +402,32 @@ func (a *CoastalAdapter) pollOnce(ctx context.Context, cursor string) (string, b
 	if err != nil {
 		pageSpan.End()
 		a.recordSourceFailure(ctx, err)
-		return cursor, false, err
+		return cursor, false, false, false, err
 	}
 
 	receivedAt := time.Now().UTC()
+	referenceTime := observationReferenceTime(page, receivedAt)
 	pageSpan.SetAttributes(attribute.Int("observations.count", len(page.Items)))
-	pageHasFreshData := pageHasFreshObservation(page.Items, receivedAt, a.policy)
-	// An empty page is a successful no-new-data poll. A non-empty page with no
-	// fresh observation is not considered healthy, even when its JSON envelope
-	// and HTTP status are valid.
-	a.sensor.RecordObservationPageFreshness(pageHasFreshData || len(page.Items) == 0)
+	pageHasFreshData := pageHasFreshObservation(page.Items, referenceTime, a.policy)
+	// An empty page is a successful no-new-data poll. During historical catch-up
+	// (dense page with an advancing cursor while the breaker is not HALF_OPEN),
+	// keep draining toward the stream head before penalizing the breaker.
+	breakerState, _, _ := a.sensor.BreakerState()
+	suppressedStale := false
 	if len(page.Items) > 0 && !pageHasFreshData {
 		a.telemetry.RecordStalePage(pageCtx)
+		isCatchUpPage := allowBacklogGrace &&
+			breakerState != CircuitHalfOpen &&
+			len(page.Items) >= catchUpBacklogMinItems &&
+			page.NextCursor != "" &&
+			page.NextCursor != cursor
+		if isCatchUpPage {
+			suppressedStale = true
+		} else {
+			a.sensor.RecordObservationPageFreshness(false)
+		}
+	} else {
+		a.sensor.RecordObservationPageFreshness(true)
 	}
 	var lastDataAt *time.Time
 	lastObservationID := ""
@@ -407,7 +450,7 @@ func (a *CoastalAdapter) pollOnce(ctx context.Context, cursor string) (string, b
 				itemSpan.SetStatus(codes.Error, "publish malformed item to quarantine failed")
 				itemSpan.End()
 				pageSpan.End()
-				return cursor, false, fmt.Errorf("publish malformed observation item %d to quarantine: %w", index, err)
+				return cursor, false, false, false, fmt.Errorf("publish malformed observation item %d to quarantine: %w", index, err)
 			}
 			a.telemetry.RecordQuarantine(itemCtx, ReasonMalformedObservation)
 			itemSpan.SetAttributes(attribute.String("observation.outcome", "quarantined"))
@@ -415,30 +458,30 @@ func (a *CoastalAdapter) pollOnce(ctx context.Context, cursor string) (string, b
 			continue
 		}
 
-		reading, reason := ValidateObservationRecord(record, a.stations, a.policy, receivedAt)
+		reading, reason := ValidateObservationRecord(record, a.stations, a.policy, referenceTime)
 		if reason == ReasonUnknownStation && !refreshedStations {
 			refreshedStations = true
 			if refreshErr := a.refreshStations(itemCtx); refreshErr != nil {
 				a.logger.Warn("station metadata refresh failed", "correlation_id", correlationID, "error", refreshErr)
 			}
-			reading, reason = ValidateObservationRecord(record, a.stations, a.policy, receivedAt)
+			reading, reason = ValidateObservationRecord(record, a.stations, a.policy, referenceTime)
 		}
 
 		if reason == ReasonUnknownStation {
-			retryRecord, enqueueErr := a.state.SaveRetryableObservation(itemCtx, record, receivedAt, correlationID)
+			retryRecord, enqueueErr := a.state.SaveRetryableObservation(itemCtx, record, receivedAt, referenceTime, correlationID)
 			if enqueueErr != nil {
 				itemSpan.RecordError(enqueueErr)
 				itemSpan.SetStatus(codes.Error, "persist unknown-station retry failed")
 				itemSpan.End()
 				pageSpan.End()
-				return cursor, false, fmt.Errorf("persist unknown-station observation %q: %w", observationID(record), enqueueErr)
+				return cursor, false, false, false, fmt.Errorf("persist unknown-station observation %q: %w", observationID(record), enqueueErr)
 			}
 			if publishErr := a.publisher.PublishQuarantine(itemCtx, record, reason, receivedAt, correlationID); publishErr != nil {
 				itemSpan.RecordError(publishErr)
 				itemSpan.SetStatus(codes.Error, "publish retryable quarantine record failed")
 				itemSpan.End()
 				pageSpan.End()
-				return cursor, false, fmt.Errorf("publish retryable unknown-station observation %q: %w", observationID(record), publishErr)
+				return cursor, false, false, false, fmt.Errorf("publish retryable unknown-station observation %q: %w", observationID(record), publishErr)
 			}
 			_ = retryRecord // returned record confirms idempotent durable enqueue
 			a.telemetry.RecordRetryQueued(itemCtx)
@@ -464,7 +507,7 @@ func (a *CoastalAdapter) pollOnce(ctx context.Context, cursor string) (string, b
 				itemSpan.SetStatus(codes.Error, "publish invalid item to quarantine failed")
 				itemSpan.End()
 				pageSpan.End()
-				return cursor, false, fmt.Errorf("publish invalid observation %q to quarantine: %w", observationID(record), err)
+				return cursor, false, false, false, fmt.Errorf("publish invalid observation %q to quarantine: %w", observationID(record), err)
 			}
 			a.telemetry.RecordQuarantine(itemCtx, reason)
 			itemSpan.SetAttributes(
@@ -497,7 +540,7 @@ func (a *CoastalAdapter) pollOnce(ctx context.Context, cursor string) (string, b
 				itemSpan.SetStatus(codes.Error, "publish normalization failure to quarantine failed")
 				itemSpan.End()
 				pageSpan.End()
-				return cursor, false, fmt.Errorf("quarantine observation %q after normalization failure: %w", reading.ObservationID, quarantineErr)
+				return cursor, false, false, false, fmt.Errorf("quarantine observation %q after normalization failure: %w", reading.ObservationID, quarantineErr)
 			}
 			a.telemetry.RecordQuarantine(itemCtx, ReasonInvalidStationMetadata)
 			a.logger.Warn("observation normalization failed; item quarantined", "observation_id", reading.ObservationID, "error", err, "correlation_id", correlationID)
@@ -510,11 +553,11 @@ func (a *CoastalAdapter) pollOnce(ctx context.Context, cursor string) (string, b
 			itemSpan.SetStatus(codes.Error, "publish HazardEvent failed")
 			itemSpan.End()
 			pageSpan.End()
-			return cursor, false, fmt.Errorf("publish HazardEvent %q: %w", event.HazardID, err)
+			return cursor, false, false, false, fmt.Errorf("publish HazardEvent %q: %w", event.HazardID, err)
 		}
 
 		a.telemetry.RecordHazardPublished(itemCtx)
-		a.telemetry.RecordDataAge(itemCtx, reading.ObservedAt)
+		a.telemetry.RecordDataAge(itemCtx, reading.ObservedAt, referenceTime)
 		itemSpan.SetAttributes(
 			attribute.String("observation.outcome", "published"),
 			attribute.String("hazard.id", event.HazardID),
@@ -531,21 +574,22 @@ func (a *CoastalAdapter) pollOnce(ctx context.Context, cursor string) (string, b
 	fetchedAt := time.Now().UTC()
 	if page.NextCursor != "" && page.NextCursor != cursor {
 		checkpointCtx, checkpointSpan := a.telemetry.StartSpan(pageCtx, "sensor_pantai.commit_checkpoint")
-		if err := a.state.CommitPage(checkpointCtx, page.NextCursor, fetchedAt, lastDataAt, lastObservationID, a.policy.MaxObservationAge); err != nil {
+		if err := a.state.CommitPage(checkpointCtx, page.NextCursor, fetchedAt, lastDataAt, lastObservationID, page.GeneratedAt, a.policy.MaxObservationAge); err != nil {
 			checkpointSpan.RecordError(err)
 			checkpointSpan.SetStatus(codes.Error, "commit checkpoint failed")
 			checkpointSpan.End()
 			pageSpan.End()
-			return cursor, false, fmt.Errorf("commit Sensor Pantai page checkpoint: %w", err)
+			return cursor, false, false, false, fmt.Errorf("commit Sensor Pantai page checkpoint: %w", err)
 		}
 		a.telemetry.RecordCheckpoint(checkpointCtx)
 		checkpointSpan.End()
 		if lastDataAt != nil {
-			a.telemetry.SetLastDataAt(*lastDataAt)
+			a.telemetry.SetLastDataAt(fetchedAt)
 		}
+		catchUp := len(page.Items) > 0
 		pageSpan.SetAttributes(attribute.Bool("checkpoint.advanced", true))
 		pageSpan.End()
-		return page.NextCursor, true, nil
+		return page.NextCursor, true, catchUp, suppressedStale, nil
 	}
 
 	// An empty page with no cursor advancement is a valid no-new-data poll.
@@ -560,21 +604,21 @@ func (a *CoastalAdapter) pollOnce(ctx context.Context, cursor string) (string, b
 		pageSpan.RecordError(fmt.Errorf("page contains items but next_cursor is empty or unchanged"))
 		pageSpan.SetStatus(codes.Error, "cursor did not advance")
 		pageSpan.End()
-		return cursor, false, fmt.Errorf("Sensor Pantai returned %d item(s) but next_cursor is empty or unchanged; refusing to advance checkpoint", len(page.Items))
+		return cursor, false, false, false, fmt.Errorf("Sensor Pantai returned %d item(s) but next_cursor is empty or unchanged; refusing to advance checkpoint", len(page.Items))
 	}
 
 	statusCtx, statusCancel := context.WithTimeout(ctx, stateOperationTimeout)
-	statusErr := a.state.RecordSuccessfulFetch(statusCtx, fetchedAt, nil, "", a.policy.MaxObservationAge)
+	statusErr := a.state.RecordSuccessfulFetch(statusCtx, fetchedAt, nil, "", page.GeneratedAt, a.policy.MaxObservationAge)
 	statusCancel()
 	if statusErr != nil {
 		pageSpan.RecordError(statusErr)
 		pageSpan.SetStatus(codes.Error, "record successful empty poll failed")
 		pageSpan.End()
-		return cursor, false, fmt.Errorf("record successful empty Sensor Pantai poll: %w", statusErr)
+		return cursor, false, false, false, fmt.Errorf("record successful empty Sensor Pantai poll: %w", statusErr)
 	}
 	pageSpan.SetAttributes(attribute.Bool("checkpoint.advanced", false))
 	pageSpan.End()
-	return cursor, false, nil
+	return cursor, false, false, false, nil
 }
 
 // retryUnknownStations reprocesses durable observations whose station metadata
@@ -657,8 +701,12 @@ func (a *CoastalAdapter) retryUnknownStations(ctx context.Context) error {
 
 		record := ObservationRecord{Raw: append([]byte(nil), item.Raw...), Observation: &observation}
 		// Queueing time is not a source contract violation. Validate timestamps
-		// against first receipt, while display freshness uses the current time.
-		reading, reason := ValidateObservationRecord(record, a.stations, a.policy, item.ReceivedAt)
+		// against first-receipt reference clock, while display freshness uses current time.
+		refTime := item.ReceivedAt
+		if item.ReferenceAt != nil && !item.ReferenceAt.IsZero() {
+			refTime = item.ReferenceAt.UTC()
+		}
+		reading, reason := ValidateObservationRecord(record, a.stations, a.policy, refTime)
 		if reason == ReasonUnknownStation {
 			a.scheduleRetry(itemCtx, item, fmt.Errorf("station %q is still unknown", observation.StationID))
 			itemSpan.SetAttributes(attribute.String("retry.outcome", "station_still_unknown"))
@@ -724,7 +772,7 @@ func (a *CoastalAdapter) retryUnknownStations(ctx context.Context) error {
 		}
 		a.telemetry.RecordHazardPublished(itemCtx)
 		a.telemetry.RecordRetryRecovered(itemCtx)
-		a.telemetry.RecordDataAge(itemCtx, reading.ObservedAt)
+		a.telemetry.RecordDataAge(itemCtx, reading.ObservedAt, refTime)
 		itemSpan.SetAttributes(
 			attribute.String("retry.outcome", "recovered"),
 			attribute.String("hazard.id", event.HazardID),

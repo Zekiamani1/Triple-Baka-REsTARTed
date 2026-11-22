@@ -26,6 +26,8 @@ const (
 	ReasonStaleObservation         ValidationReason = "stale_observation"
 	ReasonNonFiniteSeaLevelAnomaly ValidationReason = "non_finite_sea_level_anomaly"
 	ReasonNonFiniteWaveHeight      ValidationReason = "non_finite_wave_height"
+	ReasonNegativeWaveHeight       ValidationReason = "negative_wave_height"
+	ReasonInvalidQuality           ValidationReason = "invalid_quality"
 	ReasonUnknownStation           ValidationReason = "unknown_station"
 	ReasonInvalidStationMetadata   ValidationReason = "invalid_station_metadata"
 )
@@ -135,11 +137,20 @@ func ValidateObservation(
 	if math.IsNaN(*observation.WaveHeightM) || math.IsInf(*observation.WaveHeightM, 0) {
 		return CoastalReading{}, ReasonNonFiniteWaveHeight
 	}
+	if *observation.WaveHeightM < 0 {
+		return CoastalReading{}, ReasonNegativeWaveHeight
+	}
+
+	quality := strings.ToLower(strings.TrimSpace(*observation.Quality))
+	if quality != "ok" {
+		return CoastalReading{}, ReasonInvalidQuality
+	}
 
 	// Check event-time freshness before station lookup. Otherwise an old
 	// observation from an unknown station must not enter the recovery queue if
-	// it was already expired on receipt. For recovery, now is the persisted
-	// first-receipt time, so waiting for metadata does not invalidate the event.
+	// it was already expired on receipt. Compare against referenceTime (the
+	// sensor page's generated_at clock when available, or persisted first-receipt
+	// time for retries).
 	observedAt := observation.ObservedAt.UTC()
 	referenceTime := now.UTC()
 	age := referenceTime.Sub(observedAt)
@@ -165,7 +176,7 @@ func ValidateObservation(
 		ObservedAt:       observedAt,
 		SeaLevelAnomalyM: *observation.SeaLevelAnomalyM,
 		WaveHeightM:      *observation.WaveHeightM,
-		Quality:          strings.TrimSpace(*observation.Quality),
+		Quality:          quality,
 		Critical:         *observation.Critical,
 	}, ""
 }
