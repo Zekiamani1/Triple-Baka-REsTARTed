@@ -34,11 +34,11 @@ spec:
               done
           resources:
             requests:
-              cpu: 25m
-              memory: 32Mi
+              cpu: 50m
+              memory: 128Mi
             limits:
-              cpu: 100m
-              memory: 64Mi
+              cpu: 250m
+              memory: 256Mi
       containers:
         - name: coastal-adapter
           image: triple-baka-restarted-coastal-poller:latest
@@ -154,7 +154,7 @@ spec:
               memory: 128Mi
             limits:
               cpu: 500m
-              memory: 384Mi
+              memory: 256Mi
           readinessProbe:
             httpGet:
               path: /readyz
