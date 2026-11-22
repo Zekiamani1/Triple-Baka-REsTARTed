@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bmkg
+  labels:
+    app: bmkg
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bmkg
+  template:
+    metadata:
+      labels:
+        app: bmkg
+    spec:
+      containers:
+        - name: bmkg
+          image: triple-baka-restarted-bmkg:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8081
+              name: http
+          envFrom:
+            - secretRef:
+                name: bmkg-env
+          volumeMounts:
+            - name: bmkg-data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+      volumes:
+        - name: bmkg-data
+          persistentVolumeClaim:
+            claimName: bmkg-data
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pvmbg
+  labels:
+    app: pvmbg
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pvmbg
+  template:
+    metadata:
+      labels:
+        app: pvmbg
+    spec:
+      containers:
+        - name: pvmbg
+          image: triple-baka-restarted-pvmbg:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8082
+              name: http
+          envFrom:
+            - secretRef:
+                name: pvmbg-env
+          volumeMounts:
+            - name: pvmbg-data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8082
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8082
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+      volumes:
+        - name: pvmbg-data
+          persistentVolumeClaim:
+            claimName: pvmbg-data

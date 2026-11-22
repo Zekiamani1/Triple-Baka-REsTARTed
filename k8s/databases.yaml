@@ -1,0 +1,265 @@
+apiVersion: psmdb.percona.com/v1
+kind: PerconaServerMongoDB
+metadata:
+  name: mongo-cluster
+  finalizers:
+    - percona.com/delete-psmdb-pods-in-order
+spec:
+  crVersion: 1.19.0
+  image: percona/percona-server-mongodb:8.0.4-1-multi
+  imagePullPolicy: IfNotPresent
+  unsafeFlags:
+    tls: true
+    replsetSize: true
+    mongosSize: true
+    terminationGracePeriod: true
+    backupIfUnhealthy: true
+  tls:
+    mode: disabled
+  updateStrategy: SmartUpdate
+  upgradeOptions:
+    apply: disabled
+    setFCV: false
+  secrets:
+    users: mongo-cluster-secrets
+  pmm:
+    enabled: false
+    image: percona/pmm-client:2.44.0
+  backup:
+    enabled: false
+    image: percona/percona-backup-mongodb:2.8.0
+  sharding:
+    enabled: true
+    configsvrReplSet:
+      size: 3
+      configuration: |
+        storage:
+          wiredTiger:
+            engineConfig:
+              cacheSizeGB: 0.25
+      livenessProbe:
+        timeoutSeconds: 15
+        failureThreshold: 10
+      readinessProbe:
+        periodSeconds: 10
+        timeoutSeconds: 15
+        failureThreshold: 10
+      affinity:
+        antiAffinityTopologyKey: "none"
+      expose:
+        enabled: false
+        type: ClusterIP
+      volumeSpec:
+        persistentVolumeClaim:
+          resources:
+            requests:
+              storage: 1Gi
+    mongos:
+      size: 4
+      livenessProbe:
+        timeoutSeconds: 15
+        failureThreshold: 10
+      readinessProbe:
+        periodSeconds: 10
+        timeoutSeconds: 15
+        failureThreshold: 10
+      affinity:
+        antiAffinityTopologyKey: "none"
+      expose:
+        type: ClusterIP
+  replsets:
+    - name: shard1
+      size: 3
+      configuration: |
+        storage:
+          wiredTiger:
+            engineConfig:
+              cacheSizeGB: 0.25
+      livenessProbe:
+        timeoutSeconds: 15
+        failureThreshold: 10
+      readinessProbe:
+        periodSeconds: 10
+        timeoutSeconds: 15
+        failureThreshold: 10
+      affinity:
+        antiAffinityTopologyKey: "none"
+      expose:
+        enabled: false
+        type: ClusterIP
+      volumeSpec:
+        persistentVolumeClaim:
+          resources:
+            requests:
+              storage: 1Gi
+    - name: shard2
+      size: 3
+      configuration: |
+        storage:
+          wiredTiger:
+            engineConfig:
+              cacheSizeGB: 0.25
+      livenessProbe:
+        timeoutSeconds: 15
+        failureThreshold: 10
+      readinessProbe:
+        periodSeconds: 10
+        timeoutSeconds: 15
+        failureThreshold: 10
+      affinity:
+        antiAffinityTopologyKey: "none"
+      expose:
+        enabled: false
+        type: ClusterIP
+      volumeSpec:
+        persistentVolumeClaim:
+          resources:
+            requests:
+              storage: 1Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongo-cluster-init
+  labels:
+    app: mongo-cluster-init
+spec:
+  ttlSecondsAfterFinished: 60
+  template:
+    metadata:
+      labels:
+        app: mongo-cluster-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mongo-cluster-init
+          image: percona/percona-server-mongodb:8.0.4-1-multi
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: aggregate-env
+            - secretRef:
+                name: mongo-cluster-secrets
+          env:
+            - name: MONGO_URI
+              value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until mongosh "$MONGO_URI" --quiet --eval 'quit(db.getSiblingDB("config").shards.countDocuments() >= 2 ? 0 : 1)' >/dev/null 2>&1; do
+                echo "Waiting for Percona Operator to register MongoDB shards..."
+                sleep 5
+              done
+              mongosh "$MONGO_URI" --quiet --eval '
+              const command = (res) => { if (res.ok !== 1) throw new Error(JSON.stringify(res)); return res; };
+              const databaseName = process.env.MONGO_DB_NAME || "bnpb";
+              const collectionName = process.env.MONGO_COLLECTION || "hazard_events";
+              const namespace = `${databaseName}.${collectionName}`;
+              const clusterUri = `mongodb://${encodeURIComponent(process.env.MONGODB_CLUSTER_ADMIN_USER)}:${encodeURIComponent(process.env.MONGODB_CLUSTER_ADMIN_PASSWORD)}@mongo-router:27017/?authSource=admin`;
+              const clusterConn = new Mongo(clusterUri);
+              const admin = clusterConn.getDB("admin");
+              const configDb = clusterConn.getDB("config");
+              command(admin.runCommand({ setDefaultRWConcern: 1, defaultWriteConcern: { w: "majority", wtimeout: 10000 } }));
+              const events = db.getSiblingDB(databaseName).getCollection(collectionName);
+              const key = { partition_key: 1, source: 1, source_ref_id: 1 };
+              if (!configDb.collections.findOne({ _id: namespace, dropped: { $ne: true } })) {
+                if (events.countDocuments({ partition_key: { $exists: false } }) !== 0)
+                  throw new Error("Collection contains documents without partition_key; migrate them before enabling sharding");
+                events.createIndex(key, { unique: true });
+                command(admin.runCommand({ shardCollection: namespace, key, unique: true }));
+              }
+              const metadata = configDb.collections.findOne({ _id: namespace });
+              if (JSON.stringify(metadata.key) !== JSON.stringify(key))
+                throw new Error("Unexpected existing shard key");
+              const setup = db.getSiblingDB(databaseName).getCollection("_cluster_setup");
+              if (!setup.findOne({ _id: namespace, rangesReady: true })) {
+                const [firstShard, secondShard] = configDb.shards.find().sort({ _id: 1 }).toArray().map(s => s._id);
+                if (!firstShard || !secondShard)
+                  throw new Error("Expected at least 2 shards to distribute initial hash ranges");
+                const boundary = { partition_key: "8", source: MinKey(), source_ref_id: MinKey() };
+                const chunks = configDb.chunks;
+                if (!chunks.findOne({ uuid: metadata.uuid, "min.partition_key": "8" }))
+                  command(admin.runCommand({ split: namespace, middle: boundary }));
+                const lower = chunks.find({ uuid: metadata.uuid }).sort({ min: 1 }).limit(1).next();
+                if (lower.shard !== firstShard)
+                  command(admin.runCommand({ moveChunk: namespace, find: { partition_key: "0", source: "", source_ref_id: "" }, to: firstShard }));
+                const upper = chunks.findOne({ uuid: metadata.uuid, "min.partition_key": "8" });
+                if (upper.shard !== secondShard)
+                  command(admin.runCommand({ moveChunk: namespace, find: { partition_key: "9", source: "", source_ref_id: "" }, to: secondShard }));
+                setup.updateOne({ _id: namespace }, { $set: { rangesReady: true } }, { upsert: true });
+              }
+              events.createIndex({ hazard_id: 1 });
+              events.createIndex({ ingested_at: -1, source: 1, source_ref_id: 1 });
+              print(`${namespace}: sharded with unique event identity; initial hash ranges distributed`);
+              '
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: auth-db
+  labels:
+    app: auth-db
+spec:
+  serviceName: auth-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth-db
+  template:
+    metadata:
+      labels:
+        app: auth-db
+    spec:
+      containers:
+        - name: auth-db
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+              name: postgres
+          envFrom:
+            - secretRef:
+                name: auth-env
+          env:
+            - name: PGDATA
+              value: "/var/lib/postgresql/data/pgdata"
+          volumeMounts:
+            - name: auth-db-data
+              mountPath: /var/lib/postgresql/data
+            - name: auth-db-migrations
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 15
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: auth-db-migrations
+          configMap:
+            name: auth-db-migrations
+  volumeClaimTemplates:
+    - metadata:
+        name: auth-db-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
