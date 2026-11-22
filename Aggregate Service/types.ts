@@ -2,7 +2,8 @@ export type Source =
   | "BMKG"
   | "PVMBG"
   | "SATELIT"
-  | "SENSOR_PANTAI";
+  | "SENSOR_PANTAI"
+  | "TIM_LAPANGAN";
 
 export type HazardType =
   | "SEISMIC"

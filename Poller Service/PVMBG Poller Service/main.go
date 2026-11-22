@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json/v2"
+	stdjson "encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -206,20 +204,41 @@ func poll(ctx context.Context, since time.Time) (reports []VolcanoReport, err er
 		err = fmt.Errorf("PVMBG returned HTTP %d", resp.StatusCode)
 		span.RecordError(err)
 		span.SetStatus(otelcodes.Error, err.Error())
+		if resp.StatusCode >= 500 {
+			meta, _ := stdjson.Marshal(map[string]string{"url": targeturl, "since": since.Format(time.RFC3339)})
+			publishToDLQ(ctx, "PVMBG", meta, fmt.Sprintf("upstream_transient_error: HTTP %d", resp.StatusCode), true, 0)
+		}
 		return nil, err
 	}
-	a, err := io.ReadAll(resp.Body)
+	a, oversized, err := readBoundedBody(resp.Body)
 	if err != nil {
 		err = fmt.Errorf("read PVMBG response: %w", err)
 		span.RecordError(err)
 		span.SetStatus(otelcodes.Error, err.Error())
 		return nil, err
 	}
+	if reason, ok := validatePayloadBytes(a, oversized); !ok {
+		slog.WarnContext(ctx, "PVMBG payload failed poison pill guard", "reason", reason)
+		publishToDLQ(ctx, "PVMBG", a, reason, false, 0)
+		return nil, nil
+	}
 
-	if err = json.UnmarshalRead(bytes.NewReader(a), &reports); err != nil {
-		span.RecordError(err)
-		span.SetStatus(otelcodes.Error, err.Error())
-		return
+	var rawItems []stdjson.RawMessage
+	if err = stdjson.Unmarshal(a, &rawItems); err != nil {
+		slog.WarnContext(ctx, "PVMBG payload JSON unmarshal failed; parking to DLQ", "err", err)
+		publishToDLQ(ctx, "PVMBG", a, fmt.Sprintf("malformed_payload: invalid JSON (%v)", err), false, 0)
+		return nil, nil
+	}
+
+	reports = make([]VolcanoReport, 0, len(rawItems))
+	for idx, rawItem := range rawItems {
+		rep, reason, valid := validateVolcanoReport(rawItem)
+		if !valid {
+			slog.WarnContext(ctx, "PVMBG record failed schema/guard validation; parking record to DLQ", "index", idx, "reason", reason)
+			publishToDLQ(ctx, "PVMBG", rawItem, reason, false, int64(idx))
+			continue
+		}
+		reports = append(reports, *rep)
 	}
 	span.SetAttributes(attribute.Int("reports.count", len(reports)))
 	recordEventsFetched(ctx, len(reports))

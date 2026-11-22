@@ -5,7 +5,7 @@ metadata:
   labels:
     app: otel-lgtm
 spec:
-  replicas: 0
+  replicas: 1
   strategy:
     type: Recreate
   selector:
@@ -15,11 +15,17 @@ spec:
     metadata:
       labels:
         app: otel-lgtm
+        role: other
     spec:
       containers:
         - name: otel-lgtm
           image: grafana/otel-lgtm:latest
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           ports:
             - containerPort: 3000
               name: grafana
@@ -30,6 +36,12 @@ spec:
           volumeMounts:
             - name: lgtm-data
               mountPath: /data
+            - name: grafana-dashboards-provider
+              mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml
+              subPath: dashboards.yaml
+            - name: grafana-dashboards-json
+              mountPath: /var/lib/grafana/dashboards/bnpb-overview.json
+              subPath: bnpb-overview.json
           readinessProbe:
             tcpSocket:
               port: 4317
@@ -48,3 +60,9 @@ spec:
         - name: lgtm-data
           persistentVolumeClaim:
             claimName: lgtm-data
+        - name: grafana-dashboards-provider
+          configMap:
+            name: grafana-dashboards-provider
+        - name: grafana-dashboards-json
+          configMap:
+            name: grafana-dashboards-json

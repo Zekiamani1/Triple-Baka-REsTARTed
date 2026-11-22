@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: bnpb-observability
+    orgId: 1
+    folder: BNPB
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

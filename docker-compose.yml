@@ -151,24 +151,20 @@ services:
     depends_on:
       kafka-aggregate:
         condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      - /opt/kafka/bin/kafka-topics.sh
-      - --bootstrap-server
-      - kafka-aggregate:29092
-      - --create
-      - --if-not-exists
-      - --topic
-      - hazard-ingest
-      - --partitions
-      - "12"
-      - --replication-factor
-      - "1"
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-ingest --partitions 12 --replication-factor 1 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic field-reports-ingest --partitions 12 --replication-factor 1 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-dlq --partitions 3 --replication-factor 1 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --create --if-not-exists --topic hazard-retry --partitions 3 --replication-factor 1
   aggregate:
     build: 
         context: "./Aggregate Service"
         network: host
     expose:
       - "50051"
+      - "50052"
     deploy:
       replicas: 3
     init: true
@@ -180,6 +176,11 @@ services:
       KAFKA_CONSUMER_GROUP: aggregate-ingestion
       MONGO_DB_NAME: ${MONGO_DB_NAME:-bnpb}
       MONGO_COLLECTION: ${MONGO_COLLECTION:-hazard_events}
+      AUDIT_API_TOKEN: ${AUDIT_API_TOKEN:-dev-audit-token}
+    networks:
+      default:
+        aliases:
+          - aggregate-http
     depends_on:
       mongo-cluster-init:
         condition: service_completed_successfully
@@ -288,8 +289,11 @@ services:
       retries: 3
     restart: unless-stopped
   satellite-poller:
+    profiles: ["p4"]
     build: "./Poller Service/Satellite Poller Service"
-    env_file: "./Poller Service/Satellite Poller Service/.env"
+    env_file:
+      - path: "./Poller Service/Satellite Poller Service/.env"
+        required: false
     depends_on:
       kafka-init-ingest:
         condition: service_completed_successfully
@@ -400,6 +404,15 @@ services:
     depends_on:
       auth-service:
         condition: service_healthy
+  analytics-dashboard:
+    build:
+      context: "./Analytics Dashboard"
+      network: host
+    ports:
+      - "30081:80"
+    depends_on:
+      gateway:
+        condition: service_started
 volumes:
   mongo-config-data:
   mongo-shard-1-data:

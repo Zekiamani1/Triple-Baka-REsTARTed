@@ -123,6 +123,21 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  name: aggregate-http
+  labels:
+    app: aggregate-http
+spec:
+  type: ClusterIP
+  selector:
+    app: aggregate
+  ports:
+    - name: http
+      port: 50052
+      targetPort: 50052
+---
+apiVersion: v1
+kind: Service
+metadata:
   name: auth-service
   labels:
     app: auth-service

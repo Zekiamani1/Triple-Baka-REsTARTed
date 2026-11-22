@@ -364,9 +364,43 @@ func main() {
 	listenAddress := envOrDefault("BMKG_LISTEN_ADDR", ":8081")
 	fmt.Printf("Server is running on http://localhost%s\n", listenAddress)
 
-	if err := http.ListenAndServe(listenAddress, apiKeyMiddleware(bmkg)); err != nil {
+	if err := http.ListenAndServe(listenAddress, upstreamLogMiddleware(apiKeyMiddleware(bmkg))); err != nil {
 		fmt.Printf("Server failed to start: %v\n", err)
 	}
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func upstreamLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/seismic-events" && r.URL.Path != "/tsunami-warnings" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		entry, _ := json.Marshal(map[string]any{
+			"time":            time.Now().UTC().Format(time.RFC3339Nano),
+			"method":          r.Method,
+			"path":            r.URL.Path,
+			"query":           r.URL.RawQuery,
+			"poller_instance": r.Header.Get("X-Poller-Instance"),
+			"fencing_token":   r.Header.Get("X-Fencing-Token"),
+			"correlation_id":  r.Header.Get("X-Correlation-ID"),
+			"status":          rec.status,
+			"duration_ms":     time.Since(start).Milliseconds(),
+		})
+		fmt.Println(string(entry))
+	})
 }
 
 var threatLevels = []string{

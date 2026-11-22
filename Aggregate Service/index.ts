@@ -23,10 +23,20 @@ import {
   connectKafka,
   disconnectKafka,
   isKafkaReady,
+  publishFieldReport,
   publishHazard,
   runIngestConsumer,
   stopIngestConsumer,
 } from "./kafkabridge";
+import {
+  ensureUnprocessedIndexes,
+  parkUnprocessedMessage,
+  startInternalHttpServer,
+  type UnprocessedMessageDoc,
+} from "./dlqAndFieldReports";
+import { queryWithPartialFallback } from "./partialQuery";
+import type { Collection } from "mongodb";
+import type { Server as HttpServer } from "node:http";
 
 const packageDefinition = protoLoader.loadSync(path.resolve("proto/hazard/hazard.proto"), {
   keepCase: true,
@@ -59,6 +69,8 @@ const mongoClient = new MongoClient(mongo.uri, {
 });
 
 let collection: any;
+let unprocessedCol: Collection<UnprocessedMessageDoc>;
+let internalHttpServer: HttpServer | null = null;
 const server = new grpc.Server();
 let ready = false;
 let stopping = false;
@@ -96,7 +108,6 @@ async function refreshSensorPantaiStatus(): Promise<void> {
         const response = await fetch(sensorPantai.statusUrl, {
             signal: controller.signal,
             headers: { accept: "application/json" },
-            // Internal adapter status only; never follow redirects outside the configured service.
             redirect: "error",
         });
         if (!response.ok) {
@@ -104,12 +115,11 @@ async function refreshSensorPantaiStatus(): Promise<void> {
             return;
         }
         const status = await response.json() as any;
-        const dataStatus = String(status.data_status ?? "").toLowerCase();
-        const enumValue = dataStatus === "fresh" ? "DATA_STATUS_FRESH"
-            : dataStatus === "stale" ? "DATA_STATUS_STALE"
-            : "DATA_STATUS_UNAVAILABLE";
+        const value = String(status.data_status ?? "").toLowerCase();
         sensorPantaiStatusCache = {
-            data_status: enumValue,
+            data_status: value === "fresh" ? "DATA_STATUS_FRESH"
+                : value === "stale" ? "DATA_STATUS_STALE"
+                : "DATA_STATUS_UNAVAILABLE",
             ...(status.last_success_at ? { last_success_at: toProtoTimestamp(toDate(status.last_success_at)) } : {}),
             ...(status.last_data_at ? { latest_observed_at: toProtoTimestamp(toDate(status.last_data_at)) } : {}),
         };
@@ -153,7 +163,7 @@ async function trackMongoOp<T = any>(operation: string, fn: () => Promise<T>): P
     }
 }
 
-async function ingestHazard(hazardEvent: any): Promise<void> {
+async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean }): Promise<void> {
     const start = performance.now();
     const source = String(hazardEvent?.source ?? "UNKNOWN");
     const hazardType = String(hazardEvent?.hazard_type ?? "UNKNOWN");
@@ -173,29 +183,22 @@ async function ingestHazard(hazardEvent: any): Promise<void> {
         },
         async (span) => {
             try {
+                hazardEvent = {
+                    ...hazardEvent,
+                    occurred_at: toDate(hazardEvent.occurred_at),
+                    ingested_at: toDate(hazardEvent.ingested_at),
+                    attributes: plainAttributes(hazardEvent.attributes),
+                };
                 if (typeof hazardEvent.source !== "string" || !hazardEvent.source.trim() ||
                     typeof hazardEvent.source_ref_id !== "string" || !hazardEvent.source_ref_id.trim() ||
                     typeof hazardEvent.hazard_id !== "string" || !hazardEvent.hazard_id.trim()) {
                     throw new Error("HazardEvent requires source, source_ref_id, and hazard_id");
                 }
-                const attributes = plainAttributes(hazardEvent.attributes);
                 if (hazardEvent.source === "SENSOR_PANTAI" || hazardEvent.hazard_type === "COASTAL") {
                     if (hazardEvent.source !== "SENSOR_PANTAI" || hazardEvent.hazard_type !== "COASTAL" ||
-                        typeof attributes.critical !== "boolean") {
+                        typeof hazardEvent.attributes.critical !== "boolean") {
                         throw new Error("Coastal events require SENSOR_PANTAI, COASTAL, and a boolean critical attribute");
                     }
-                }
-                hazardEvent = {
-                    ...hazardEvent,
-                    occurred_at: toDate(hazardEvent.occurred_at),
-                    ingested_at: toDate(hazardEvent.ingested_at),
-                    // Keep Kafka/storage attributes as plain JSON. Struct is
-                    // only the gRPC boundary representation.
-                    attributes,
-                };
-                if (typeof hazardEvent.source !== "string" || !hazardEvent.source.trim() ||
-                    typeof hazardEvent.source_ref_id !== "string" || !hazardEvent.source_ref_id.trim()) {
-                    throw new Error("source and source_ref_id must be non-empty strings");
                 }
                 const identity = {
                     // Matches the pre-split hash ranges configured by init-cluster.js.
@@ -220,7 +223,7 @@ async function ingestHazard(hazardEvent: any): Promise<void> {
                     const existingEvent = await trackMongoOp("findOne", () =>
                         collection.findOne(identity),
                     );
-                    if (existingEvent?.published) {
+                    if (existingEvent?.published && !opts?.upsert) {
                         logInfo("duplicate hazard event ignored", {
                             source: hazardEvent.source,
                             source_ref_id: hazardEvent.source_ref_id,
@@ -235,7 +238,25 @@ async function ingestHazard(hazardEvent: any): Promise<void> {
                         throw error;
                     }
 
-                    eventToPublish = withoutDeliveryState(existingEvent);
+                    if (opts?.upsert) {
+                        const preservedId = existingEvent.hazard_id ?? hazardEvent.hazard_id;
+                        await trackMongoOp("updateOne", () =>
+                            collection.updateOne(identity, {
+                                $set: {
+                                    severity: hazardEvent.severity,
+                                    area_name: hazardEvent.area_name,
+                                    latitude: hazardEvent.latitude,
+                                    longitude: hazardEvent.longitude,
+                                    occurred_at: hazardEvent.occurred_at,
+                                    ingested_at: hazardEvent.ingested_at,
+                                    attributes: plainAttributes(hazardEvent.attributes),
+                                },
+                            }),
+                        );
+                        eventToPublish = { ...hazardEvent, hazard_id: preservedId };
+                    } else {
+                        eventToPublish = withoutDeliveryState(existingEvent);
+                    }
                 }
 
                 await publishHazard(eventToPublish);
@@ -322,36 +343,61 @@ async function aggregateEvent(call: grpc.ServerUnaryCall<any, any>, callback: gr
 
 const LIST_CACHE_TTL_MS = 2000;
 const LIST_CACHE_MAX_ENTRIES = 500;
-const listHazardsCache = new Map<string, { expiresAt: number; payload: { hazards: any[]; total: number } }>();
-const listHazardsInFlight = new Map<string, Promise<{ hazards: any[]; total: number }>>();
+const listHazardsCache = new Map<string, { expiresAt: number; payload: { hazards: any[]; total: number; partial: boolean; unavailable_units: string[] } }>();
+const listHazardsInFlight = new Map<string, Promise<{ hazards: any[]; total: number; partial: boolean; unavailable_units: string[] }>>();
 
 async function fetchListHazardsPayload(
     filter: Record<string, unknown>,
     limit: number,
     offset: number,
     span: any,
-): Promise<{ hazards: any[]; total: number }> {
+): Promise<{ hazards: any[]; total: number; partial: boolean; unavailable_units: string[] }> {
     const isUnfiltered = Object.keys(filter).length === 0;
-    const [hazards, total] = await Promise.all([
-        trackMongoOp("find", () =>
-            collection.find(filter, {
-                projection: { _id: 0, partition_key: 0, published: 0, published_at: 0 }
-            })
-            .sort({ ingested_at: -1, source: 1, source_ref_id: 1 })
-            .skip(offset)
-            .limit(limit)
-            .toArray()
-        ),
-        trackMongoOp(isUnfiltered ? "estimatedDocumentCount" : "countDocuments", () =>
-            isUnfiltered
-                ? collection.estimatedDocumentCount()
-                : collection.countDocuments(filter)
-        ),
-    ]);
+    const partialRes = await queryWithPartialFallback(
+        mongoClient,
+        mongo.dbName,
+        mongo.collection,
+        async (col, opts) => {
+            const [hazards, total] = await Promise.all([
+                trackMongoOp("find", () =>
+                    col
+                        .find(filter, { allowPartialResults: opts.allowPartialResults, maxTimeMS: opts.maxTimeMS })
+                        .project({
+                            _id: 0,
+                            hazard_id: 1,
+                            source: 1,
+                            source_ref_id: 1,
+                            hazard_type: 1,
+                            severity: 1,
+                            area_name: 1,
+                            latitude: 1,
+                            longitude: 1,
+                            occurred_at: 1,
+                            ingested_at: 1,
+                            attributes: 1,
+                        })
+                        .sort({ ingested_at: -1, source: 1, source_ref_id: 1 })
+                        .skip(offset)
+                        .limit(limit)
+                        .toArray()
+                ),
+                trackMongoOp(isUnfiltered ? "estimatedDocumentCount" : "countDocuments", () =>
+                    isUnfiltered
+                        ? col.estimatedDocumentCount({ maxTimeMS: opts.maxTimeMS })
+                        : col.countDocuments(filter, { maxTimeMS: opts.maxTimeMS })
+                ),
+            ]);
+            return { hazards, total };
+        },
+    );
+
+    const hazards = partialRes.data?.hazards ?? [];
+    const total = partialRes.data?.total ?? 0;
 
     span.setAttributes({
         "query.result_count": hazards.length,
         "query.total_count": total,
+        "query.partial": partialRes.partial,
     });
 
     return {
@@ -362,6 +408,8 @@ async function fetchListHazardsPayload(
             attributes: toStruct(plainAttributes(h.attributes)),
         })),
         total,
+        partial: partialRes.partial,
+        unavailable_units: partialRes.unavailable_units,
     };
 }
 
@@ -408,7 +456,7 @@ async function listHazards(call: grpc.ServerUnaryCall<any, any>, callback: grpc.
                 const cacheKey = `${filter.source ?? ""}|${filter.hazard_type ?? ""}|${filter.severity ?? ""}|${limit}|${offset}`;
                 const now = Date.now();
                 const cached = listHazardsCache.get(cacheKey);
-                let payload: { hazards: any[]; total: number };
+                let payload: { hazards: any[]; total: number; partial: boolean; unavailable_units: string[] };
 
                 if (cached && cached.expiresAt > now) {
                     span.setAttribute("query.cache_hit", true);
@@ -546,9 +594,66 @@ async function main () {
     collection = db.collection(mongo.collection);
     await collection.createIndex({ partition_key: 1, source: 1, source_ref_id: 1 }, { unique: true });
     await collection.createIndex({ hazard_id: 1 });
+    unprocessedCol = await ensureUnprocessedIndexes(db);
 
     await connectKafka();
-    void runIngestConsumer(ingestHazard).catch((error) => {
+    internalHttpServer = startInternalHttpServer({
+        mongoClient,
+        dbName: mongo.dbName,
+        collectionName: mongo.collection,
+        unprocessedCol,
+        ingestHazard,
+        publishFieldReport,
+    });
+    void runIngestConsumer({
+        onHazard: (hazard) => ingestHazard(hazard),
+        onDlqMessage: async (dlq) => {
+            await parkUnprocessedMessage(unprocessedCol, {
+                message_id: typeof dlq.message_id === "string" ? dlq.message_id : undefined,
+                source: String(dlq.source ?? "UNKNOWN"),
+                source_ref_id: String(dlq.source_ref_id ?? ""),
+                raw_payload: String(dlq.raw_payload ?? JSON.stringify(dlq)),
+                raw_encoding: dlq.raw_encoding === "base64" ? "base64" : "utf8",
+                received_at: typeof dlq.received_at === "string" ? dlq.received_at : undefined,
+                reason: String(dlq.reason ?? "dlq_parked"),
+                retryable: Boolean(dlq.retryable),
+                attempts: Number(dlq.attempts ?? 1) || 1,
+                status: dlq.retryable ? "retrying" : "parked",
+                seq: Number(dlq.seq ?? 0) || 0,
+            });
+        },
+        onPoisonPill: async (info) => {
+            await parkUnprocessedMessage(unprocessedCol, {
+                source: info.source,
+                raw_payload: info.rawPayload,
+                raw_encoding: info.rawEncoding,
+                reason: info.reason,
+                retryable: false,
+                status: "parked",
+            });
+        },
+        onRetryableFailure: async (info) => {
+            const doc = await parkUnprocessedMessage(unprocessedCol, {
+                message_id: info.messageId,
+                source: info.source,
+                source_ref_id: info.sourceRefId,
+                raw_payload: info.rawPayload,
+                raw_encoding: "utf8",
+                reason: info.reason,
+                retryable: !info.exhausted,
+                attempts: info.attempts,
+                status: info.exhausted ? "parked" : "retrying",
+            });
+            return doc.message_id;
+        },
+        onRetryRecovered: async (messageId) => {
+            const now = new Date();
+            await unprocessedCol.updateOne(
+                { message_id: messageId },
+                { $set: { status: "recovered", recovered_at: now, updated_at: now } },
+            );
+        },
+    }).catch((error) => {
         logError("Kafka ingestion consumer failed", {
             err: error instanceof Error ? error.message : String(error),
         });
@@ -640,6 +745,10 @@ async function shutdown(exitCode = 0) {
       new Promise<void>((resolve, reject) => {
         server.tryShutdown(error => error ? reject(error) : resolve());
       }),
+      new Promise<void>((resolve) => {
+        if (!internalHttpServer) return resolve();
+        internalHttpServer.close(() => resolve());
+      }),
     ]);
     // Producer and storage stay available until in-flight work has finished.
     await disconnectKafka();
@@ -709,24 +818,14 @@ function toStruct(obj: Record<string, unknown> | undefined): any {
 
 // protobuf Struct -> plain JS (for requests)
 function fromProtoValue(v: any): unknown {
-  if (!v || typeof v !== "object") return null;
-  if ("number_value" in v || "numberValue" in v) return v.number_value ?? v.numberValue;
-  if ("string_value" in v || "stringValue" in v) return v.string_value ?? v.stringValue;
-  if ("bool_value" in v || "boolValue" in v) return v.bool_value ?? v.boolValue;
-  if ("struct_value" in v || "structValue" in v) return fromStruct(v.struct_value ?? v.structValue);
-  if ("list_value" in v || "listValue" in v) return ((v.list_value ?? v.listValue).values ?? []).map(fromProtoValue);
-  return null;
-}
-
-function plainAttributes(attributes: any): Record<string, unknown> {
-  if (!attributes || typeof attributes !== "object" || Array.isArray(attributes)) return {};
-  // Read documents written by the previous Struct-based storage path too.
-  if (Object.keys(attributes).length === 1 && attributes.fields &&
-      Object.values(attributes.fields).every((value: any) => value && typeof value === "object" &&
-        Object.keys(value).some(key => key === "kind" || key.endsWith("Value") || key.endsWith("_value")))) {
-    return fromStruct(attributes);
+  switch (v?.kind) {
+    case "numberValue": return v.numberValue;
+    case "stringValue": return v.stringValue;
+    case "boolValue": return v.boolValue;
+    case "structValue": return fromStruct(v.structValue);
+    case "listValue": return (v.listValue?.values ?? []).map(fromProtoValue);
+    default: return null;
   }
-  return attributes;
 }
 
 function fromStruct(s: any): Record<string, unknown> {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/brianvoe/gofakeit/v7"
@@ -59,8 +60,10 @@ type VolcanoReport struct {
 }
 
 var db *gorm.DB
-var version = 1
+var stateMu sync.RWMutex
+var schemaMode = "v1"
 var outage = false
+var pendingMalformed []string
 
 func envOrDefault(name, fallback string) string {
 	if value := os.Getenv(name); value != "" {
@@ -123,10 +126,67 @@ func health(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "UP")
 }
 func schemachange(w http.ResponseWriter, r *http.Request) {
-	version = 2
-	w.WriteHeader(200)
-	fmt.Fprint(w, "Schema Changed")
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if r.Body != nil {
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&req); err != nil && err.Error() != "EOF" {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+	}
+	mode := strings.TrimSpace(req.Mode)
+	if mode == "" {
+		mode = "additive"
+	} else if mode == "v2" {
+		mode = "additive"
+	}
+	switch mode {
+	case "v1", "additive", "breaking_rename", "breaking_type", "breaking_missing":
+	default:
+		http.Error(w, "unsupported schema mode", http.StatusBadRequest)
+		return
+	}
+
+	stateMu.Lock()
+	schemaMode = mode
+	stateMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"mode": mode})
 }
+
+func injectMalformed(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mode string `json:"mode"`
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	kind := strings.TrimSpace(req.Mode)
+	if kind == "" {
+		kind = strings.TrimSpace(req.Type)
+	}
+	switch kind {
+	case "truncated", "deep_nesting", "invalid_utf8", "oversized":
+	default:
+		http.Error(w, "unsupported malformed type; expected truncated, deep_nesting, invalid_utf8, or oversized", http.StatusBadRequest)
+		return
+	}
+
+	stateMu.Lock()
+	pendingMalformed = append(pendingMalformed, kind)
+	stateMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"queued": kind})
+}
+
 func doOutage(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Enabled bool `json:"enabled"`
@@ -135,49 +195,149 @@ func doOutage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request body must be {\"enabled\": true|false}", http.StatusBadRequest)
 		return
 	}
+	stateMu.Lock()
 	outage = request.Enabled
+	current := outage
+	stateMu.Unlock()
 	w.WriteHeader(200)
-	fmt.Fprintf(w, "outage=%t", outage)
+	fmt.Fprintf(w, "outage=%t", current)
 }
+
+func formatReportForMode(report VolcanoReport, mode string) map[string]any {
+	base := map[string]any{
+		"report_id":            report.ReportID,
+		"volcano_id":           report.VolcanoID,
+		"alert_level":          report.AlertLevel,
+		"eruption_count_24h":   report.EruptionCount24h,
+		"ash_column_height_m":  report.AshColumnHeightM,
+		"reported_at":          report.ReportedAt,
+	}
+	switch mode {
+	case "additive":
+		if report.ConfidenceLevel != 0 {
+			base["confidence_level"] = report.ConfidenceLevel
+		} else {
+			base["confidence_level"] = 0.95
+		}
+	case "breaking_rename":
+		delete(base, "alert_level")
+		delete(base, "volcano_id")
+		base["status_tingkat"] = report.AlertLevel
+		base["mountain_name"] = report.VolcanoID
+	case "breaking_type":
+		base["eruption_count_24h"] = fmt.Sprintf("%d kali", report.EruptionCount24h)
+		base["alert_level"] = 3
+	case "breaking_missing":
+		delete(base, "volcano_id")
+	}
+	return base
+}
+
+func buildMalformedPayload(kind string, validReports []map[string]any) []byte {
+	switch kind {
+	case "truncated":
+		return []byte(`[{"report_id":"malformed-truncated-1","volcano_id":"Merapi","alert_level":"Siaga"`)
+	case "invalid_utf8":
+		return append([]byte(`[{"report_id":"malformed-utf8-1","volcano_id":"`), []byte{0xff, 0xfe, 0xfd, '"', '}'}...)
+	case "deep_nesting":
+		var b strings.Builder
+		for i := 0; i < 70; i++ {
+			b.WriteString(`{"n":`)
+		}
+		b.WriteString(`1`)
+		for i := 0; i < 70; i++ {
+			b.WriteString(`}`)
+		}
+		bad := map[string]any{
+			"report_id":           "malformed-deep-1",
+			"volcano_id":          "Merapi",
+			"alert_level":         "Siaga",
+			"eruption_count_24h":  1,
+			"ash_column_height_m": 100.0,
+			"reported_at":         time.Now().UTC(),
+			"nested":              json.RawMessage(b.String()),
+		}
+		items := append(validReports, bad)
+		out, _ := json.Marshal(items)
+		return out
+	case "oversized":
+		bigStr := strings.Repeat("A", 2*1024*1024+1024)
+		bad := map[string]any{
+			"report_id":           "malformed-oversized-1",
+			"volcano_id":          "Merapi",
+			"alert_level":         "Siaga",
+			"eruption_count_24h":  1,
+			"ash_column_height_m": 100.0,
+			"reported_at":         time.Now().UTC(),
+			"padding":             bigStr,
+		}
+		items := append(validReports, bad)
+		out, _ := json.Marshal(items)
+		return out
+	default:
+		out, _ := json.Marshal(validReports)
+		return out
+	}
+}
+
 func VolcanoReportHandler(w http.ResponseWriter, r *http.Request) {
 	var reports []VolcanoReport
 	since := r.URL.Query().Get("since")
 	if since == "" {
 		result := db.Find(&reports)
-
 		if result.Error != nil {
 			log.Printf("query volcanic reports: %v", result.Error)
 			http.Error(w, "temporary database error", http.StatusInternalServerError)
 			return
 		}
-		body, _ := json.Marshal(reports)
-		w.Write(body)
-		return
-	}
-	parsedsince, err := time.Parse(time.RFC3339, since)
-	if err != nil {
-		w.WriteHeader(400)
-		fmt.Fprint(w, err.Error())
-		return
+	} else {
+		parsedsince, err := time.Parse(time.RFC3339, since)
+		if err != nil {
+			w.WriteHeader(400)
+			fmt.Fprint(w, err.Error())
+			return
+		}
+		result := db.Where("reported_at >= ?", parsedsince).Find(&reports)
+		if result.Error != nil {
+			log.Printf("query volcanic reports since %s: %v", parsedsince.Format(time.RFC3339), result.Error)
+			http.Error(w, "temporary database error", http.StatusInternalServerError)
+			return
+		}
 	}
 
-	result := db.Where("reported_at >= ?", parsedsince).Find(&reports)
+	stateMu.Lock()
+	mode := schemaMode
+	var malformedKind string
+	if len(pendingMalformed) > 0 {
+		malformedKind = pendingMalformed[0]
+		pendingMalformed = pendingMalformed[1:]
+	}
+	stateMu.Unlock()
 
-	if result.Error != nil {
-		log.Printf("query volcanic reports since %s: %v", parsedsince.Format(time.RFC3339), result.Error)
-		http.Error(w, "temporary database error", http.StatusInternalServerError)
+	formatted := make([]map[string]any, 0, len(reports))
+	for _, rep := range reports {
+		formatted = append(formatted, formatReportForMode(rep, mode))
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if malformedKind != "" {
+		w.Write(buildMalformedPayload(malformedKind, formatted))
 		return
 	}
-	body, _ := json.Marshal(reports)
+	body, _ := json.Marshal(formatted)
 	w.Write(body)
 }
-func outageMiddleware(outage *bool, next http.Handler) http.Handler {
+
+func outageMiddleware(_ *bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/outage" || r.URL.Path == "/health" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if *outage {
+		stateMu.RLock()
+		isOutage := outage
+		stateMu.RUnlock()
+		if isOutage {
 			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 			return
 		}
@@ -199,15 +359,50 @@ func main() {
 	pvmbg.HandleFunc("GET /volcanic-reports", VolcanoReportHandler)
 	pvmbg.HandleFunc("GET /health", health)
 	pvmbg.HandleFunc("POST /admin/schema-version", schemachange)
+	pvmbg.HandleFunc("POST /admin/inject-malformed", injectMalformed)
 	pvmbg.HandleFunc("POST /admin/outage", doOutage)
 
 	listenAddress := envOrDefault("PVMBG_LISTEN_ADDR", ":8082")
 	fmt.Printf("Server is running on http://localhost%s\n", listenAddress)
-	handler := outageMiddleware(&outage, apiKeyMiddleware(pvmbg))
+	handler := upstreamLogMiddleware(outageMiddleware(&outage, apiKeyMiddleware(pvmbg)))
 
 	if err := http.ListenAndServe(listenAddress, handler); err != nil {
 		fmt.Printf("Server failed to start: %v\n", err)
 	}
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func upstreamLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/volcanic-reports" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		entry, _ := json.Marshal(map[string]any{
+			"time":            time.Now().UTC().Format(time.RFC3339Nano),
+			"method":          r.Method,
+			"path":            r.URL.Path,
+			"query":           r.URL.RawQuery,
+			"poller_instance": r.Header.Get("X-Poller-Instance"),
+			"fencing_token":   r.Header.Get("X-Fencing-Token"),
+			"correlation_id":  r.Header.Get("X-Correlation-ID"),
+			"status":          rec.status,
+			"duration_ms":     time.Since(start).Milliseconds(),
+		})
+		fmt.Println(string(entry))
+	})
 }
 
 func initdb() {
@@ -280,7 +475,10 @@ func generateEventAt(reportedAt time.Time) error {
 	report.ReportID = id.String()
 	report.VolcanoID = gofakeit.RandomString(volcanos)
 	report.ReportedAt = reportedAt
-	if version == 1 {
+	stateMu.RLock()
+	currentMode := schemaMode
+	stateMu.RUnlock()
+	if currentMode == "v1" {
 		report.ConfidenceLevel = 0
 	}
 	result := db.Create(&report)

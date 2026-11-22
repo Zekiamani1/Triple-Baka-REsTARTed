@@ -4,10 +4,12 @@ import type { Span } from "@opentelemetry/api";
 import { kafkaConfig, healthPort } from "./config";
 import {
   getDeliveryId,
+  type HazardMessage,
   isCoastalEvent,
   isCriticalCoastal,
   isEmergency,
   parseHazardMessage,
+  PoisonPillError,
 } from "./message";
 import { deliverWithRetry } from "./delivery";
 import {
@@ -71,6 +73,30 @@ async function commitMessage(consumer: Consumer, payload: EachMessagePayload): P
   }]);
 }
 
+async function parseOrCommitPoisonPill(
+  consumer: Consumer,
+  payload: EachMessagePayload,
+  startedAt: number,
+): Promise<HazardMessage | undefined> {
+  try {
+    return parseHazardMessage(payload.message.value);
+  } catch (error) {
+    if (!(error instanceof PoisonPillError)) throw error;
+    logWarn("poison-pill hazard message skipped", {
+      topic: payload.topic,
+      partition: payload.partition,
+      offset: payload.message.offset,
+      reason: error.message,
+    });
+    recordMessageConsumed(
+      payload.topic, "UNKNOWN", "UNKNOWN", "UNKNOWN", false,
+      "error", performance.now() - startedAt,
+    );
+    await commitMessage(consumer, payload);
+    return undefined;
+  }
+}
+
 async function withConsumerSpan<T>(
   payload: EachMessagePayload,
   operation: (span: Span) => Promise<T>,
@@ -114,7 +140,8 @@ async function withConsumerSpan<T>(
 async function handleGeneralMessage(payload: EachMessagePayload): Promise<void> {
   const startedAt = performance.now();
   await withConsumerSpan(payload, async (span) => {
-    const event = parseHazardMessage(payload.message.value);
+    const event = await parseOrCommitPoisonPill(generalConsumer, payload, startedAt);
+    if (!event) return;
     const source = String(event.source ?? "UNKNOWN");
     const hazardType = String(event.hazard_type ?? "UNKNOWN");
     const severity = String(event.severity ?? "UNKNOWN");
@@ -165,7 +192,8 @@ async function handleGeneralMessage(payload: EachMessagePayload): Promise<void> 
 async function handleCriticalMessage(payload: EachMessagePayload): Promise<void> {
   const startedAt = performance.now();
   await withConsumerSpan(payload, async (span) => {
-    const event = parseHazardMessage(payload.message.value);
+    const event = await parseOrCommitPoisonPill(criticalConsumer, payload, startedAt);
+    if (!event) return;
     const source = String(event.source ?? "UNKNOWN");
     const hazardType = String(event.hazard_type ?? "UNKNOWN");
     const severity = String(event.severity ?? "UNKNOWN");

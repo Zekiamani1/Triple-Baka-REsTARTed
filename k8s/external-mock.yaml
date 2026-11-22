@@ -15,11 +15,20 @@ spec:
     metadata:
       labels:
         app: bmkg
+        role: mock
     spec:
       containers:
         - name: bmkg
           image: triple-baka-restarted-bmkg:latest
           imagePullPolicy: IfNotPresent
+          env:
+            - name: GOMEMLIMIT
+              value: "96MiB"
+          resources:
+            requests:
+              memory: "64Mi"
+            limits:
+              memory: "128Mi"
           ports:
             - containerPort: 8081
               name: http
@@ -67,11 +76,20 @@ spec:
     metadata:
       labels:
         app: pvmbg
+        role: mock
     spec:
       containers:
         - name: pvmbg
           image: triple-baka-restarted-pvmbg:latest
           imagePullPolicy: IfNotPresent
+          env:
+            - name: GOMEMLIMIT
+              value: "96MiB"
+          resources:
+            requests:
+              memory: "64Mi"
+            limits:
+              memory: "128Mi"
           ports:
             - containerPort: 8082
               name: http

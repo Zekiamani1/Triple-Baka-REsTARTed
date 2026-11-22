@@ -7,10 +7,12 @@ import {
   type Producer,
 } from "kafkajs";
 import { kafka as kafkaConfig } from "./config";
+import { PoisonPillError, validateAndDecodeJsonPayload } from "./poisonGuard";
 import {
   extractContextFromKafkaHeaders,
   injectContextIntoKafkaHeaders,
   logInfo,
+  logWarn,
   recordKafkaConsumed,
   recordKafkaPublish,
   SCOPE_NAME,
@@ -48,13 +50,57 @@ export async function connectKafka(): Promise<void> {
   await producer.connect();
   await consumer.connect();
   await consumer.subscribe({ topic: kafkaConfig.inTopic, fromBeginning: true });
+  await consumer.subscribe({ topic: kafkaConfig.fieldReportsTopic, fromBeginning: true });
+  await consumer.subscribe({ topic: kafkaConfig.dlqTopic, fromBeginning: true });
+  await consumer.subscribe({ topic: kafkaConfig.retryTopic, fromBeginning: true });
   logInfo("Kafka producer connected", { brokers: kafkaConfig.brokers });
-  logInfo("Kafka consumer listening", { topic: kafkaConfig.inTopic });
+  logInfo("Kafka consumer listening", {
+    topics: [
+      kafkaConfig.inTopic,
+      kafkaConfig.fieldReportsTopic,
+      kafkaConfig.dlqTopic,
+      kafkaConfig.retryTopic,
+    ],
+  });
+}
+
+export interface IngestConsumerHandlers {
+  onHazard: (hazard: Record<string, unknown>) => Promise<void>;
+  onDlqMessage?: (dlq: Record<string, unknown>) => Promise<void>;
+  onPoisonPill?: (info: {
+    topic: string;
+    rawPayload: string;
+    rawEncoding: "utf8" | "base64";
+    reason: string;
+    source: string;
+  }) => Promise<void>;
+  onRetryableFailure?: (info: {
+    messageId?: string;
+    source: string;
+    sourceRefId: string;
+    rawPayload: string;
+    reason: string;
+    attempts: number;
+    exhausted: boolean;
+  }) => Promise<string>;
+  onRetryRecovered?: (messageId: string) => Promise<void>;
+}
+
+function decodeRawForDlq(value: Buffer | null): { rawPayload: string; rawEncoding: "utf8" | "base64" } {
+  if (!value) return { rawPayload: "", rawEncoding: "utf8" };
+  try {
+    return { rawPayload: new TextDecoder("utf-8", { fatal: true }).decode(value), rawEncoding: "utf8" };
+  } catch {
+    return { rawPayload: value.toString("base64"), rawEncoding: "base64" };
+  }
 }
 
 export async function runIngestConsumer(
-  handler: (hazard: Record<string, unknown>) => Promise<void>,
+  handlerOrOpts: ((hazard: Record<string, unknown>) => Promise<void>) | IngestConsumerHandlers,
 ): Promise<void> {
+  const handlers: IngestConsumerHandlers =
+    typeof handlerOrOpts === "function" ? { onHazard: handlerOrOpts } : handlerOrOpts;
+
   await consumer.run({
     eachMessage: async ({ topic, partition, message }: EachMessagePayload) => {
       const parentCtx = extractContextFromKafkaHeaders(message.headers);
@@ -74,13 +120,51 @@ export async function runIngestConsumer(
         parentCtx,
         async (span) => {
           try {
-            if (!message.value) {
-              throw new Error("Received an empty inbound HazardEvent");
+            let payload: Record<string, unknown>;
+            try {
+              payload = validateAndDecodeJsonPayload(message.value);
+            } catch (err) {
+              if (err instanceof PoisonPillError) {
+                recordKafkaConsumed(topic, "poison_pill");
+                logWarn("poison pill message parked and offset committed", {
+                  topic,
+                  partition,
+                  offset: message.offset,
+                  reason: err.reason,
+                });
+                if (handlers.onPoisonPill) {
+                  const raw = decodeRawForDlq(message.value);
+                  await handlers.onPoisonPill({
+                    topic,
+                    rawPayload: raw.rawPayload,
+                    rawEncoding: raw.rawEncoding,
+                    reason: err.reason,
+                    source: topic === kafkaConfig.fieldReportsTopic ? "TIM_LAPANGAN" : "UNKNOWN",
+                  });
+                }
+                span.setStatus({ code: SpanStatusCode.ERROR, message: err.reason });
+                return; // Commit offset without crashing
+              }
+              throw err;
             }
 
-            const hazard = JSON.parse(message.value.toString("utf8"));
-            if (typeof hazard !== "object" || hazard === null || Array.isArray(hazard)) {
-              throw new Error("Inbound HazardEvent must be a JSON object");
+            if (topic === kafkaConfig.dlqTopic) {
+              if (handlers.onDlqMessage) {
+                await handlers.onDlqMessage(payload);
+              }
+              recordKafkaConsumed(topic, "success");
+              span.setStatus({ code: SpanStatusCode.OK });
+              return;
+            }
+
+            const isRetryTopic = topic === kafkaConfig.retryTopic;
+            const retryMeta = isRetryTopic ? (payload as { _retry_attempts?: number; _dlq_message_id?: string; hazard?: Record<string, unknown> }) : null;
+            const hazard = isRetryTopic && retryMeta?.hazard ? retryMeta.hazard : payload;
+            const attempts = isRetryTopic ? Number(retryMeta?._retry_attempts ?? 1) : 0;
+
+            if (isRetryTopic && attempts > 0) {
+              const backoffMs = Math.min(500 * 2 ** (attempts - 1), 10000);
+              await new Promise((r) => setTimeout(r, backoffMs));
             }
             if (kafkaConfig.expectedSource && hazard.source !== kafkaConfig.expectedSource) {
               throw new Error(`Expected ${kafkaConfig.expectedSource} on ${topic}`);
@@ -93,10 +177,50 @@ export async function runIngestConsumer(
               "hazard.severity": String(hazard.severity ?? ""),
             });
 
-            await handler(hazard as Record<string, unknown>);
+            try {
+              await handlers.onHazard(hazard);
+              if (isRetryTopic && retryMeta?._dlq_message_id && handlers.onRetryRecovered) {
+                await handlers.onRetryRecovered(retryMeta._dlq_message_id);
+              }
+              recordKafkaConsumed(topic, "success");
+              span.setStatus({ code: SpanStatusCode.OK });
+            } catch (err: any) {
+              const nextAttempts = attempts + 1;
+              const maxAttempts = 5;
+              const exhausted = nextAttempts >= maxAttempts;
+              const reason = err instanceof Error ? err.message : String(err);
 
-            recordKafkaConsumed(topic, "success");
-            span.setStatus({ code: SpanStatusCode.OK });
+              if (handlers.onRetryableFailure) {
+                const msgId = await handlers.onRetryableFailure({
+                  messageId: retryMeta?._dlq_message_id,
+                  source: String(hazard.source ?? "UNKNOWN"),
+                  sourceRefId: String(hazard.source_ref_id ?? ""),
+                  rawPayload: JSON.stringify(hazard),
+                  reason,
+                  attempts: nextAttempts,
+                  exhausted,
+                });
+                if (!exhausted) {
+                  await producer.send({
+                    topic: kafkaConfig.retryTopic,
+                    messages: [
+                      {
+                        key: String(hazard.source_ref_id ?? hazard.hazard_id ?? msgId),
+                        value: JSON.stringify({
+                          _dlq_message_id: msgId,
+                          _retry_attempts: nextAttempts,
+                          hazard,
+                        }),
+                      },
+                    ],
+                  });
+                }
+                recordKafkaConsumed(topic, "retry");
+                span.setStatus({ code: SpanStatusCode.ERROR, message: reason });
+                return;
+              }
+              throw err;
+            }
           } catch (err: any) {
             recordKafkaConsumed(topic, "error");
             span.recordException(err);
@@ -111,6 +235,21 @@ export async function runIngestConsumer(
         },
       );
     },
+  });
+}
+
+export async function publishFieldReport(event: Record<string, unknown>): Promise<void> {
+  const key = String(event.source_ref_id ?? event.hazard_id ?? "");
+  await producer.send({
+    topic: kafkaConfig.fieldReportsTopic,
+    acks: -1,
+    messages: [
+      {
+        key,
+        value: JSON.stringify(event),
+        headers: injectContextIntoKafkaHeaders(undefined),
+      },
+    ],
   });
 }
 
