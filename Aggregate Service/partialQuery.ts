@@ -118,7 +118,7 @@ async function isShardAvailable(mongoClient: MongoClient, shard: ShardDocument):
       tls: mongoClient.options.tls,
       tlsCAFile: mongoClient.options.tlsCAFile,
       tlsCertificateKeyFile: mongoClient.options.tlsCertificateKeyFile,
-      tlsCertificateKeyFilePassword: mongoClient.options.tlsCertificateKeyFilePassword,
+      tlsCertificateKeyFilePassword: (mongoClient.options as { tlsCertificateKeyFilePassword?: string }).tlsCertificateKeyFilePassword,
       tlsAllowInvalidCertificates: mongoClient.options.tlsAllowInvalidCertificates,
       tlsAllowInvalidHostnames: mongoClient.options.tlsAllowInvalidHostnames,
       tlsInsecure: mongoClient.options.tlsInsecure,

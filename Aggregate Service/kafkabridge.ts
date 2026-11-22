@@ -73,14 +73,24 @@ export async function connectKafka(): Promise<void> {
     await consumer.subscribe({ topic: kafkaConfig.fieldReportsTopic, fromBeginning: true });
     await consumer.subscribe({ topic: kafkaConfig.dlqTopic, fromBeginning: true });
     await consumer.subscribe({ topic: kafkaConfig.retryTopic, fromBeginning: true });
-    topics.push(kafkaConfig.fieldReportsTopic, kafkaConfig.dlqTopic, kafkaConfig.retryTopic);
+    await consumer.subscribe({ topic: kafkaConfig.pantaiQuarantineTopic, fromBeginning: true });
+    topics.push(
+      kafkaConfig.fieldReportsTopic,
+      kafkaConfig.dlqTopic,
+      kafkaConfig.retryTopic,
+      kafkaConfig.pantaiQuarantineTopic,
+    );
   }
   logInfo("Kafka producer connected", { brokers: kafkaConfig.brokers });
   logInfo("Kafka consumer listening", { topics });
 }
 
 export interface IngestConsumerHandlers {
-  onHazard: (hazard: Record<string, unknown>, fence?: { source: string; instanceId: string; token: number }) => Promise<void | boolean>;
+  onHazard: (
+    hazard: Record<string, unknown>,
+    meta?: { revision?: number; upsert?: boolean },
+  ) => Promise<void>;
+  onRetract?: (info: { source: string; sourceRefId: string; revision: number }) => Promise<void>;
   onDlqMessage?: (dlq: Record<string, unknown>) => Promise<void>;
   onPoisonPill?: (info: {
     topic: string;
@@ -99,6 +109,31 @@ export interface IngestConsumerHandlers {
     exhausted: boolean;
   }) => Promise<string>;
   onRetryRecovered?: (messageId: string) => Promise<void>;
+}
+
+function readHeaderString(headers: Message["headers"], name: string): string {
+  const value = headers?.[name];
+  return Array.isArray(value)
+    ? String(value[0] ?? "")
+    : Buffer.isBuffer(value)
+      ? value.toString("utf8")
+      : String(value ?? "");
+}
+
+export function parseSatelliteHeaders(
+  headers?: Message["headers"],
+  key?: Buffer | string | null,
+): { revision?: number; sourceRefId: string } {
+  const rawRevision = readHeaderString(headers, "revision").trim();
+  const revisionNum = rawRevision ? Number(rawRevision) : NaN;
+  const revision = Number.isSafeInteger(revisionNum) && revisionNum > 0 ? revisionNum : undefined;
+  const headerSourceRefId = readHeaderString(headers, "source_ref_id").trim();
+  const keyStr =
+    Buffer.isBuffer(key) ? key.toString("utf8").trim() : typeof key === "string" ? key.trim() : "";
+  return {
+    revision,
+    sourceRefId: headerSourceRefId || keyStr,
+  };
 }
 
 function decodeRawForDlq(value: Buffer | null): { rawPayload: string; rawEncoding: "utf8" | "base64" } {
@@ -135,6 +170,31 @@ export async function runIngestConsumer(
         parentCtx,
         async (span) => {
           try {
+            const satMeta = parseSatelliteHeaders(message.headers, message.key);
+            if (
+              topic === kafkaConfig.inTopic &&
+              (!message.value || message.value.length === 0) &&
+              satMeta.sourceRefId &&
+              satMeta.revision !== undefined
+            ) {
+              span.setAttributes({
+                "hazard.source": "SATELIT",
+                "hazard.source_ref_id": satMeta.sourceRefId,
+                "hazard.revision": satMeta.revision,
+                "hazard.retract": true,
+              });
+              if (handlers.onRetract) {
+                await handlers.onRetract({
+                  source: "SATELIT",
+                  sourceRefId: satMeta.sourceRefId,
+                  revision: satMeta.revision,
+                });
+              }
+              recordKafkaConsumed(topic, "retract");
+              span.setStatus({ code: SpanStatusCode.OK });
+              return;
+            }
+
             let payload: Record<string, unknown>;
             try {
               payload = validateAndDecodeJsonPayload(message.value);
@@ -163,7 +223,7 @@ export async function runIngestConsumer(
               throw err;
             }
 
-            if (topic === kafkaConfig.dlqTopic) {
+            if (topic === kafkaConfig.dlqTopic || topic === kafkaConfig.pantaiQuarantineTopic) {
               if (handlers.onDlqMessage) {
                 await handlers.onDlqMessage(payload);
               }
@@ -175,16 +235,10 @@ export async function runIngestConsumer(
             const isRetryTopic = topic === kafkaConfig.retryTopic;
             const retryMeta = isRetryTopic ? (payload as { _retry_attempts?: number; _dlq_message_id?: string; hazard?: Record<string, unknown> }) : null;
             const hazard = isRetryTopic && retryMeta?.hazard ? retryMeta.hazard : payload;
-            const headerValue = (name: string): string => {
-              const value = message.headers?.[name];
-              return Array.isArray(value) ? String(value[0] ?? "") : Buffer.isBuffer(value) ? value.toString("utf8") : String(value ?? "");
-            };
-            const fenceSource = headerValue("x-poller-source");
-            const fenceInstance = headerValue("x-poller-instance");
-            const fenceToken = Number(headerValue("x-fencing-token"));
-            const fence = fenceSource && fenceInstance && Number.isSafeInteger(fenceToken) && fenceToken > 0
-              ? { source: fenceSource, instanceId: fenceInstance, token: fenceToken }
-              : undefined;
+            const hazardMeta =
+              satMeta.revision !== undefined && hazard.source === "SATELIT"
+                ? { revision: satMeta.revision, upsert: true }
+                : undefined;
             const attempts = isRetryTopic ? Number(retryMeta?._retry_attempts ?? 1) : 0;
 
             if (isRetryTopic && attempts > 0) {
@@ -203,13 +257,7 @@ export async function runIngestConsumer(
             });
 
             try {
-              const accepted = await handlers.onHazard(hazard, fence);
-              if (accepted === false) {
-                recordKafkaConsumed(topic, "stale_fence");
-                logWarn("stale poller event ignored", { topic, source: fenceSource, instance_id: fenceInstance, fencing_token: fenceToken });
-                span.setStatus({ code: SpanStatusCode.OK });
-                return;
-              }
+              await handlers.onHazard(hazard, hazardMeta);
               if (isRetryTopic && retryMeta?._dlq_message_id && handlers.onRetryRecovered) {
                 await handlers.onRetryRecovered(retryMeta._dlq_message_id);
               }
@@ -232,6 +280,13 @@ export async function runIngestConsumer(
                   exhausted,
                 });
                 if (!exhausted) {
+                  const retryHeaders: Record<string, string> = {};
+                  if (satMeta.revision !== undefined) {
+                    retryHeaders["revision"] = String(satMeta.revision);
+                  }
+                  if (satMeta.sourceRefId) {
+                    retryHeaders["source_ref_id"] = satMeta.sourceRefId;
+                  }
                   await producer.send({
                     topic: kafkaConfig.retryTopic,
                     messages: [
@@ -242,11 +297,7 @@ export async function runIngestConsumer(
                           _retry_attempts: nextAttempts,
                           hazard,
                         }),
-                        headers: fence ? {
-                          "x-poller-source": fence.source,
-                          "x-poller-instance": fence.instanceId,
-                          "x-fencing-token": String(fence.token),
-                        } : undefined,
+                        headers: Object.keys(retryHeaders).length > 0 ? retryHeaders : undefined,
                       },
                     ],
                   });

@@ -360,7 +360,7 @@ metadata:
   labels:
     app: bmkg-poller
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: bmkg-poller
@@ -370,14 +370,6 @@ spec:
         app: bmkg-poller
         role: aggregator
     spec:
-      topologySpreadConstraints:
-        - maxSkew: 1
-          minDomains: 2
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: DoNotSchedule
-          labelSelector:
-            matchLabels:
-              app: bmkg-poller
       containers:
         - name: bmkg-poller
           image: triple-baka-restarted-bmkg-poller:latest
@@ -393,11 +385,6 @@ spec:
           envFrom:
             - secretRef:
                 name: bmkg-poller-env
-            - secretRef:
-                name: audit-secret
-          env:
-            - name: AGGREGATE_INTERNAL_URL
-              value: http://aggregate-http:50052
           readinessProbe:
             httpGet:
               path: /health
@@ -422,7 +409,7 @@ metadata:
   labels:
     app: pvmbg-poller
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: pvmbg-poller
@@ -432,14 +419,6 @@ spec:
         app: pvmbg-poller
         role: aggregator
     spec:
-      topologySpreadConstraints:
-        - maxSkew: 1
-          minDomains: 2
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: DoNotSchedule
-          labelSelector:
-            matchLabels:
-              app: pvmbg-poller
       containers:
         - name: pvmbg-poller
           image: triple-baka-restarted-pvmbg-poller:latest
@@ -455,11 +434,6 @@ spec:
           envFrom:
             - secretRef:
                 name: pvmbg-poller-env
-            - secretRef:
-                name: audit-secret
-          env:
-            - name: AGGREGATE_INTERNAL_URL
-              value: http://aggregate-http:50052
           readinessProbe:
             httpGet:
               path: /health

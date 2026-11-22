@@ -151,7 +151,7 @@ function protoToHazard(protoHazard: any) {
 }
 
 function withoutDeliveryState(document: any): Record<string, unknown> {
-    const { _id, partition_key, published, published_at, ...hazardEvent } = document;
+    const { _id, partition_key, published, published_at, _revision, ...hazardEvent } = document;
     return { ...hazardEvent, attributes: plainAttributes(hazardEvent.attributes) };
 }
 
@@ -167,13 +167,13 @@ async function trackMongoOp<T = any>(operation: string, fn: () => Promise<T>): P
     }
 }
 
-async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean; requireFence?: boolean; fence?: { source: string; instanceId: string; token: number } }): Promise<boolean> {
+async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean; revision?: number }): Promise<void> {
     const start = performance.now();
     const source = String(hazardEvent?.source ?? "UNKNOWN");
     const hazardType = String(hazardEvent?.hazard_type ?? "UNKNOWN");
     const severity = String(hazardEvent?.severity ?? "UNKNOWN");
 
-    return await trace.getTracer(SCOPE_NAME).startActiveSpan(
+    await trace.getTracer(SCOPE_NAME).startActiveSpan(
         "AggregateService.ingestHazard",
         {
             kind: SpanKind.INTERNAL,
@@ -222,31 +222,13 @@ async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean; require
 
                 let eventToPublish = hazardEvent;
 
+                const revisionField = opts?.revision !== undefined ? { _revision: opts.revision } : {};
+
                 try {
-                    if (opts?.requireFence && ["BMKG", "PVMBG"].includes(String(hazardEvent.source))) {
-                        const fence = opts.fence;
-                        if (!fence || fence.source !== hazardEvent.source) return false;
-                        const session = mongoClient.startSession();
-                        try {
-                            await session.withTransaction(async () => {
-                                const leaseWrite = await mongoClient.db(mongo.dbName).collection("_poller_leases").updateOne(
-                                    { _id: fence.source, owner_id: fence.instanceId, fencing_token: fence.token, $expr: { $gt: ["$expires_at", "$$NOW"] } },
-                                    { $inc: { accepted_events: 1 } },
-                                    { session },
-                                );
-                                if (leaseWrite.matchedCount !== 1) throw new Error("stale poller fencing token");
-                                await collection.insertOne({ ...hazardEvent, ...identity, published: false }, { session });
-                            });
-                        } finally {
-                            await session.endSession();
-                        }
-                    } else {
-                        await trackMongoOp("insertOne", () =>
-                            collection.insertOne({ ...hazardEvent, ...identity, published: false }),
-                        );
-                    }
+                    await trackMongoOp("insertOne", () =>
+                        collection.insertOne({ ...hazardEvent, ...identity, ...revisionField, published: false }),
+                    );
                 } catch (error: any) {
-                    if (error instanceof Error && error.message === "stale poller fencing token") return false;
                     if (error?.code !== 11000) {
                         throw error;
                     }
@@ -262,7 +244,7 @@ async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean; require
                         span.setAttribute("hazard.duplicate", true);
                         recordIngestEvent(source, hazardType, severity, "duplicate", performance.now() - start);
                         span.setStatus({ code: SpanStatusCode.OK });
-                        return true;
+                        return;
                     }
 
                     if (!existingEvent) {
@@ -270,6 +252,22 @@ async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean; require
                     }
 
                     if (opts?.upsert) {
+                        if (
+                            opts.revision !== undefined &&
+                            typeof existingEvent._revision === "number" &&
+                            opts.revision <= existingEvent._revision
+                        ) {
+                            logInfo("stale or duplicate revision ignored", {
+                                source: hazardEvent.source,
+                                source_ref_id: hazardEvent.source_ref_id,
+                                revision: opts.revision,
+                                existing_revision: existingEvent._revision,
+                            });
+                            span.setAttribute("hazard.duplicate", true);
+                            recordIngestEvent(source, hazardType, severity, "duplicate", performance.now() - start);
+                            span.setStatus({ code: SpanStatusCode.OK });
+                            return;
+                        }
                         const preservedId = existingEvent.hazard_id ?? hazardEvent.hazard_id;
                         await trackMongoOp("updateOne", () =>
                             collection.updateOne(identity, {
@@ -281,9 +279,11 @@ async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean; require
                                     occurred_at: hazardEvent.occurred_at,
                                     ingested_at: hazardEvent.ingested_at,
                                     attributes: hazardEvent.attributes,
+                                    ...revisionField,
                                 },
                             }),
                         );
+                        listHazardsCache.clear();
                         eventToPublish = { ...hazardEvent, hazard_id: preservedId };
                     } else {
                         eventToPublish = withoutDeliveryState(existingEvent);
@@ -305,7 +305,6 @@ async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean; require
                     source_ref_id: eventToPublish.source_ref_id,
                     hazard_id: eventToPublish.hazard_id,
                 });
-                return true;
             } catch (error: any) {
                 recordIngestEvent(source, hazardType, severity, "error", performance.now() - start);
                 logError("failed to ingest hazard event", {
@@ -324,6 +323,29 @@ async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean; require
             }
         },
     );
+}
+
+async function retractHazard(info: { source: string; sourceRefId: string; revision: number }): Promise<void> {
+    const identity = {
+        partition_key: createHash("sha256")
+            .update(JSON.stringify([info.source, info.sourceRefId]))
+            .digest("hex"),
+        source: info.source,
+        source_ref_id: info.sourceRefId,
+    };
+    const res = await trackMongoOp("deleteOne", () =>
+        collection.deleteOne({
+            ...identity,
+            $or: [{ _revision: { $exists: false } }, { _revision: { $lte: info.revision } }],
+        }),
+    );
+    listHazardsCache.clear();
+    logInfo("HazardEvent retracted", {
+        source: info.source,
+        source_ref_id: info.sourceRefId,
+        revision: info.revision,
+        deleted_count: res.deletedCount,
+    });
 }
 
 async function aggregateEvent(call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) {
@@ -576,7 +598,7 @@ async function getHazard(call: grpc.ServerUnaryCall<any, any>, callback: grpc.se
                 const hazardEvent = await trackMongoOp("findOne", () =>
                     collection.findOne(
                         { hazard_id: hazardId },
-                        { projection: { _id: 0, partition_key: 0, published: 0, published_at: 0 } },
+                        { projection: { _id: 0, partition_key: 0, published: 0, published_at: 0, _revision: 0 } },
                     ),
                 );
 
@@ -638,26 +660,38 @@ async function main () {
         dbName: mongo.dbName,
         collectionName: mongo.collection,
         unprocessedCol,
-        ingestHazard: async (event, opts) => { await ingestHazard(event, opts); },
+        ingestHazard,
         publishFieldReport,
     });
     const runIngester = service.mode === "ingester" || service.mode === "all";
     if (runIngester) {
       await connectKafka();
       void runIngestConsumer({
-        onHazard: (hazard, fence) => ingestHazard(hazard, { requireFence: true, fence }),
+        onHazard: (hazard, meta) =>
+          ingestHazard(hazard, {
+            upsert: meta?.upsert,
+            revision: meta?.revision,
+          }),
+        onRetract: (info) => retractHazard(info),
         onDlqMessage: async (dlq) => {
+            const hasBase64Payload = typeof dlq.payload_base64 === "string";
+            const statusVal =
+                dlq.status === "recovered" || dlq.status === "retrying" || dlq.status === "parked"
+                    ? dlq.status
+                    : dlq.retryable
+                      ? "retrying"
+                      : "parked";
             await parkUnprocessedMessage(unprocessedCol, {
                 message_id: typeof dlq.message_id === "string" ? dlq.message_id : undefined,
                 source: String(dlq.source ?? "UNKNOWN"),
-                source_ref_id: String(dlq.source_ref_id ?? ""),
-                raw_payload: String(dlq.raw_payload ?? JSON.stringify(dlq)),
-                raw_encoding: dlq.raw_encoding === "base64" ? "base64" : "utf8",
+                source_ref_id: String(dlq.source_ref_id ?? dlq.observation_id ?? ""),
+                raw_payload: String(dlq.raw_payload ?? dlq.payload_base64 ?? JSON.stringify(dlq)),
+                raw_encoding: dlq.raw_encoding === "base64" || hasBase64Payload ? "base64" : "utf8",
                 received_at: typeof dlq.received_at === "string" ? dlq.received_at : undefined,
                 reason: String(dlq.reason ?? "dlq_parked"),
                 retryable: Boolean(dlq.retryable),
                 attempts: Number(dlq.attempts ?? 1) || 1,
-                status: dlq.retryable ? "retrying" : "parked",
+                status: statusVal,
                 seq: Number(dlq.seq ?? 0) || 0,
             });
         },

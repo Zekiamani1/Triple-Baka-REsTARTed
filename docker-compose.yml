@@ -179,6 +179,9 @@ services:
       MONGO_DB_NAME: ${MONGO_DB_NAME:-bnpb}
       MONGO_COLLECTION: ${MONGO_COLLECTION:-hazard_events}
       AUDIT_API_TOKEN: ${AUDIT_API_TOKEN:-dev-audit-token}
+      SENSOR_PANTAI_STATUS_URL: http://coastal-adapter:8089/internal/source-status
+      KAFKA_TOPIC_HAZARD_CRITICAL: hazard-critical
+      KAFKA_TOPIC_PANTAI_QUARANTINE: pantai-quarantine
     networks:
       default:
         aliases:
@@ -228,16 +231,11 @@ services:
       context: "./Poller Service/BMKG Poller Service"
       network: host
     env_file: "./Poller Service/BMKG Poller Service/.env"
-    environment:
-      AGGREGATE_INTERNAL_URL: http://aggregate-http:50052
-      AUDIT_API_TOKEN: ${AUDIT_API_TOKEN:-dev-audit-token}
     depends_on:
       bmkg:
         condition: service_healthy
       kafka-init-ingest:
         condition: service_completed_successfully
-      aggregate:
-        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8085/health >/dev/null 2>&1"]
       interval: 5s
@@ -249,16 +247,11 @@ services:
       context: "./Poller Service/PVMBG Poller Service"
       network: host
     env_file: "./Poller Service/PVMBG Poller Service/.env"
-    environment:
-      AGGREGATE_INTERNAL_URL: http://aggregate-http:50052
-      AUDIT_API_TOKEN: ${AUDIT_API_TOKEN:-dev-audit-token}
     depends_on:
       pvmbg:
         condition: service_healthy
       kafka-init-ingest:
         condition: service_completed_successfully
-      aggregate:
-        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8086/health >/dev/null 2>&1"]
       interval: 5s
@@ -266,8 +259,9 @@ services:
       retries: 3
     restart: unless-stopped
   satellite-poller:
-    profiles: ["p4"]
-    build: "./Poller Service/Satellite Poller Service"
+    build:
+      context: "./Poller Service/Satellite Poller Service"
+      network: host
     env_file:
       - path: "./Poller Service/Satellite Poller Service/.env"
         required: false
@@ -281,6 +275,58 @@ services:
       interval: 5s
       timeout: 3s
       retries: 3
+    restart: unless-stopped
+  sensor-pantai:
+    image: sustuna/sensor-pantai@sha256:51fbd90d3891ad6e9f5768ad330ffb65205644cb29e50da65c7538f2e0b4397d
+    expose:
+      - "8080"
+    environment:
+      PANTAI_PROFILE: ${PANTAI_PROFILE:-practice}
+      PANTAI_SEED: ${PANTAI_SEED:-42}
+      PANTAI_SPEED: ${PANTAI_SPEED:-60}
+      PANTAI_AUTH_TOKEN: ${PANTAI_AUTH_TOKEN:-replace-with-secret}
+    restart: unless-stopped
+  coastal-adapter:
+    build:
+      context: "./Poller Service/Coastal Poller Service"
+      network: host
+    image: triple-baka-restarted-coastal-poller:latest
+    env_file: "./Poller Service/Coastal Poller Service/.env"
+    environment:
+      SENSOR_BASE_URL: http://sensor-pantai:8080
+      PANTAI_AUTH_TOKEN: ${PANTAI_AUTH_TOKEN:-replace-with-secret}
+      KAFKA_BROKERS: kafka-aggregate:29092
+      KAFKA_TOPIC_PANTAI_INGEST: hazard-ingest
+      KAFKA_TOPIC_PANTAI_QUARANTINE: pantai-quarantine
+      PANTAI_STATE_URI: mongodb://mongo-router:27017/coastal_adapter?retryWrites=true&w=majority
+    depends_on:
+      sensor-pantai:
+        condition: service_started
+      mongo-cluster-init:
+        condition: service_completed_successfully
+      kafka-init-ingest:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8089/healthz >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+  field-receiver:
+    build:
+      context: "./Field Receiver"
+      network: host
+    env_file: "./Field Receiver/.env"
+    environment:
+      FIELD_RECEIVER_MONGODB_URI: mongodb://mongo-router:27017/field_receiver?retryWrites=true&w=majority
+    depends_on:
+      mongo-cluster-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8090/readyz >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
   event-consumer:
     build: 
@@ -304,6 +350,10 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
+      kafka-init-ingest:
+        condition: service_completed_successfully
+      field-receiver:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8088/health >/dev/null 2>&1"]

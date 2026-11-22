@@ -16,7 +16,6 @@ spec:
                 operator: In
                 values:
                   - aggregate
-                  - aggregate-api
                   - aggregate-ingester
                   - coastal-adapter
                   - field-receiver

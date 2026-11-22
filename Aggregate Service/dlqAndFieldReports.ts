@@ -274,25 +274,32 @@ export async function parkUnprocessedMessage(
     recovered_at: null,
   };
 
+  const setFields: Record<string, unknown> = {
+    reason: doc.reason,
+    retryable: doc.retryable,
+    status: doc.status,
+    updated_at: now,
+  };
+  const setOnInsertFields: Record<string, unknown> = {
+    source: doc.source,
+    source_ref_id: doc.source_ref_id,
+    raw_payload: doc.raw_payload,
+    raw_encoding: doc.raw_encoding,
+    received_at: doc.received_at,
+    seq: doc.seq,
+    created_at: doc.created_at,
+  };
+  if (doc.status === "recovered") {
+    setFields.recovered_at = now;
+  } else {
+    setOnInsertFields.recovered_at = null;
+  }
+
   await col.updateOne(
     { message_id: doc.message_id },
     {
-      $set: {
-        reason: doc.reason,
-        retryable: doc.retryable,
-        status: doc.status,
-        updated_at: now,
-      },
-      $setOnInsert: {
-        source: doc.source,
-        source_ref_id: doc.source_ref_id,
-        raw_payload: doc.raw_payload,
-        raw_encoding: doc.raw_encoding,
-        received_at: doc.received_at,
-        seq: doc.seq,
-        created_at: doc.created_at,
-        recovered_at: null,
-      },
+      $set: setFields,
+      $setOnInsert: setOnInsertFields,
       $max: { attempts: doc.attempts },
     },
     { upsert: true },
@@ -339,83 +346,6 @@ export function startInternalHttpServer(deps: {
       if (method === "GET" && url.pathname === "/health") {
         res.writeHead(200);
         res.end("UP");
-        return;
-      }
-
-      if (method === "POST" && url.pathname === "/internal/poller/lease") {
-        if (!process.env.AUDIT_API_TOKEN || req.headers.authorization !== `Bearer ${process.env.AUDIT_API_TOKEN}`) {
-          sendError(res, 401, "unauthorized", "invalid coordinator token");
-          return;
-        }
-        const input = validateAndDecodeJsonPayload(await readRequestBody(req)) as {
-          source?: string; instance_id?: string; fencing_token?: number; advance_checkpoint?: boolean;
-        };
-        const source = String(input.source ?? "");
-        const owner = String(input.instance_id ?? "");
-        if (!(["BMKG", "PVMBG"].includes(source)) || !owner || owner.length > 200) {
-          sendError(res, 400, "bad_request", "invalid poller source or instance_id");
-          return;
-        }
-
-        const leases = deps.mongoClient.db(deps.dbName, { readPreference: "primary" }).collection("_poller_leases");
-        let lease = await leases.findOne({ _id: source });
-        if (!lease) {
-          try {
-            const created = await leases.updateOne(
-              { _id: source, owner_id: { $exists: false } },
-              [{ $set: {
-                owner_id: owner,
-                fencing_token: 1,
-                checkpoint: null,
-                expires_at: { $dateAdd: { startDate: "$$NOW", unit: "millisecond", amount: 30_000 } },
-                updated_at: "$$NOW",
-              } }],
-              { upsert: true },
-            );
-            if (created.upsertedCount === 1 || created.modifiedCount === 1) {
-              lease = await leases.findOne({ _id: source });
-              sendJson(res, 200, { acquired: true, fencing_token: 1, checkpoint: null, server_time: lease?.updated_at, lease_ms: 30_000 });
-              return;
-            }
-          } catch (error: any) {
-            if (error?.code !== 11000) throw error;
-          }
-          lease = await leases.findOne({ _id: source });
-        }
-
-        if (lease?.owner_id === owner && Number(input.fencing_token) === Number(lease.fencing_token)) {
-          const renewed = await leases.updateOne(
-            { _id: source, owner_id: owner, fencing_token: lease.fencing_token, $expr: { $gt: ["$expires_at", "$$NOW"] } },
-            [{ $set: {
-              expires_at: { $dateAdd: { startDate: "$$NOW", unit: "millisecond", amount: 30_000 } },
-              updated_at: "$$NOW",
-              ...(input.advance_checkpoint ? { checkpoint: "$$NOW" } : {}),
-            } }],
-          );
-          if (renewed.matchedCount === 1) {
-            lease = await leases.findOne({ _id: source });
-            sendJson(res, 200, { acquired: true, fencing_token: lease?.fencing_token, checkpoint: lease?.checkpoint ?? null, server_time: lease?.updated_at, lease_ms: 30_000 });
-            return;
-          }
-        }
-
-        if (lease) {
-          const taken = await leases.findOneAndUpdate(
-            { _id: source, fencing_token: lease.fencing_token, $expr: { $lte: ["$expires_at", "$$NOW"] } },
-            [{ $set: {
-              owner_id: owner,
-              fencing_token: { $add: ["$fencing_token", 1] },
-              expires_at: { $dateAdd: { startDate: "$$NOW", unit: "millisecond", amount: 30_000 } },
-              updated_at: "$$NOW",
-            } }],
-            { returnDocument: "after" },
-          );
-          if (taken) {
-            sendJson(res, 200, { acquired: true, fencing_token: taken.fencing_token, checkpoint: taken.checkpoint ?? null, server_time: taken.updated_at, lease_ms: 30_000 });
-            return;
-          }
-        }
-        sendJson(res, 200, { acquired: false, retry_after_ms: 3_000 });
         return;
       }
 

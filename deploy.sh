@@ -81,6 +81,7 @@ kubectl rollout status deploy/auth-service -n "$NS" --timeout=300s
 kubectl rollout status deploy/bmkg -n "$NS" --timeout=300s
 kubectl rollout status deploy/pvmbg -n "$NS" --timeout=300s
 kubectl rollout status deploy/aggregate -n "$NS" --timeout=300s
+kubectl rollout status deploy/aggregate-ingester -n "$NS" --timeout=300s
 kubectl rollout status deploy/bmkg-poller -n "$NS" --timeout=300s
 kubectl rollout status deploy/pvmbg-poller -n "$NS" --timeout=300s
 kubectl rollout status deploy/satellite-poller -n "$NS" --timeout=300s

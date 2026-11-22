@@ -21,14 +21,15 @@ spec:
     spec:
       initContainers:
         - name: wait-for-pantai-topics
-          image: apache/kafka:3.8.1
+          image: apache/kafka:latest
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
             - -c
             - |
-              until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --describe --topic hazard-ingest >/dev/null 2>&1; do
-                echo "Waiting for hazard-ingest topic..."
+              until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --describe --topic hazard-ingest >/dev/null 2>&1 \
+                 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-aggregate:29092 --describe --topic pantai-quarantine >/dev/null 2>&1; do
+                echo "Waiting for hazard-ingest and pantai-quarantine topics..."
                 sleep 3
               done
           resources:

@@ -82,19 +82,11 @@ func requiredEnv(name string) string {
 }
 
 func pvmbgRequest(ctx context.Context, targetURL string) (*http.Response, error) {
-	if err := confirmPollLease(ctx); err != nil {
-		return nil, err
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+requiredEnv("PVMBG_API_KEY"))
-	instance, token := pollerFence(ctx)
-	if instance != "" && token > 0 {
-		req.Header.Set("X-Poller-Instance", instance)
-		req.Header.Set("X-Fencing-Token", strconv.FormatUint(token, 10))
-	}
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 	return httpClient().Do(req)
 }
@@ -152,15 +144,6 @@ func SendToAggregate(ctx context.Context, thething *proto.Hazard) error {
 
 	var headers kafkaHeaderCarrier
 	otel.GetTextMapPropagator().Inject(ctx, &headers)
-	instance, token := pollerFence(ctx)
-	if instance == "" || token == 0 {
-		return fmt.Errorf("cannot publish without active poller lease")
-	}
-	headers = append(headers,
-		kafka.Header{Key: "x-poller-source", Value: []byte("PVMBG")},
-		kafka.Header{Key: "x-poller-instance", Value: []byte(instance)},
-		kafka.Header{Key: "x-fencing-token", Value: []byte(strconv.FormatUint(token, 10))},
-	)
 
 	err = writer.WriteMessages(ctx, kafka.Message{
 		Key:     []byte(thething.HazardId),
@@ -320,9 +303,6 @@ func main() {
 	startHealthServer()
 	interval := pollInterval()
 	now := time.Now()
-	lease := newPollLease("PVMBG")
-	lease.startHeartbeat(ctx)
-	var activeFenceToken uint64
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -333,28 +313,8 @@ func main() {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			leaseCtx, leaseCancel := context.WithTimeout(ctx, 5*time.Second)
-			leaseState, leaseErr := lease.update(leaseCtx, false)
-			leaseCancel()
-			if leaseErr != nil || !leaseState.Acquired {
-				if leaseErr != nil {
-					slog.WarnContext(ctx, "PVMBG lease request failed", "err", leaseErr)
-				}
-				continue
-			}
-			if leaseState.Token != activeFenceToken {
-				activeFenceToken = leaseState.Token
-				cursorTime := leaseState.Checkpoint
-				if cursorTime == "" {
-					cursorTime = leaseState.ServerTime
-				}
-				if parsed, err := time.Parse(time.RFC3339Nano, cursorTime); err == nil {
-					now = parsed.Add(-2 * time.Minute)
-				}
-			}
 			cycleStart := time.Now()
-			fencedCtx := withPollerFence(ctx, lease, leaseState.Token)
-			cycleCtx, cycleSpan := otel.Tracer(pvmbgPollerScope).Start(fencedCtx, "PVMBGPoller.PollCycle",
+			cycleCtx, cycleSpan := otel.Tracer(pvmbgPollerScope).Start(ctx, "PVMBGPoller.PollCycle",
 				trace.WithAttributes(attribute.String("poll.cursor", now.Format(time.RFC3339))),
 			)
 
@@ -370,12 +330,7 @@ func main() {
 			}
 
 			published := true
-			if err := confirmPollLease(cycleCtx); err != nil {
-				slog.WarnContext(cycleCtx, "PVMBG lease lost before publishing", "err", err)
-				published = false
-			}
 			for _, data := range events {
-				if !published { break }
 				normalized := normalize(cycleCtx, data)
 				if err := SendToAggregate(cycleCtx, &normalized); err != nil {
 					slog.ErrorContext(cycleCtx, "PVMBG publish failed; keeping cursor", "cursor", now.Format(time.RFC3339), "err", err)
@@ -388,16 +343,7 @@ func main() {
 
 			durationMs := float64(time.Since(cycleStart).Nanoseconds()) / 1e6
 			if published {
-				checkpointCtx, checkpointCancel := context.WithTimeout(ctx, 5*time.Second)
-				checkpoint, err := lease.update(checkpointCtx, true)
-				if err != nil {
-					slog.WarnContext(ctx, "PVMBG checkpoint update failed", "err", err)
-				} else if checkpoint.Acquired {
-					if serverTime, err := time.Parse(time.RFC3339Nano, checkpoint.ServerTime); err == nil {
-						now = serverTime
-					}
-				}
-				checkpointCancel()
+				now = time.Now()
 				cycleSpan.SetStatus(otelcodes.Ok, "")
 				recordPollCycle(cycleCtx, "success", durationMs)
 			} else {

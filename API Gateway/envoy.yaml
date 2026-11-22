@@ -156,6 +156,9 @@ static_resources:
                             cluster: aggregator_http
                             timeout: 30s
                           typed_per_filter_config:
+                            envoy.filters.http.jwt_authn:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                              requirement_name: auth_provider
                             envoy.filters.http.grpc_json_transcoder:
                               "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
                               disabled: true
@@ -166,6 +169,9 @@ static_resources:
                             cluster: aggregator_http
                             timeout: 15s
                           typed_per_filter_config:
+                            envoy.filters.http.jwt_authn:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                              requirement_name: auth_provider
                             envoy.filters.http.grpc_json_transcoder:
                               "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
                               disabled: true
