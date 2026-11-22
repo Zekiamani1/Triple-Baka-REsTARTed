@@ -24,35 +24,6 @@ import type { IHeaders } from "kafkajs";
 
 export const SCOPE_NAME = process.env.OTEL_SERVICE_NAME ?? "alert-consumer";
 
-type Instruments = {
-  alertsTriggeredCounter: ReturnType<ReturnType<typeof metrics.getMeter>["createCounter"]>;
-  messagesConsumedCounter: ReturnType<ReturnType<typeof metrics.getMeter>["createCounter"]>;
-  processingDurationHist: ReturnType<ReturnType<typeof metrics.getMeter>["createHistogram"]>;
-};
-
-let cachedInstruments: Instruments | null = null;
-
-function initInstruments(): Instruments {
-  const m = metrics.getMeter(SCOPE_NAME);
-  cachedInstruments = {
-    alertsTriggeredCounter: m.createCounter("alert_consumer.alerts.triggered_total", {
-      description: "Total number of emergency alerts triggered (SIAGA/AWAS or critical coastal)",
-    }),
-    messagesConsumedCounter: m.createCounter("alert_consumer.messages.consumed_total", {
-      description: "Total number of hazard events consumed by Alert Consumer",
-    }),
-    processingDurationHist: m.createHistogram("alert_consumer.messages.processing_duration_ms", {
-      description: "Duration of processing a Kafka hazard event in milliseconds",
-      unit: "ms",
-    }),
-  };
-  return cachedInstruments;
-}
-
-function getInstruments(): Instruments {
-  return cachedInstruments ?? initInstruments();
-}
-
 export function initTelemetry(): () => Promise<void> {
   if (process.env.OTEL_SDK_DISABLED === "true") return async () => {};
 
@@ -71,8 +42,6 @@ export function initTelemetry(): () => Promise<void> {
   });
 
   sdk.start();
-  initInstruments();
-
   return async () => {
     await sdk.shutdown().catch((err) => {
       logError("failed to shutdown OpenTelemetry SDK", { err: String(err) });
@@ -126,12 +95,11 @@ export function recordAlertTriggered(
   severity: string,
   areaName: string,
 ): void {
-  getInstruments().alertsTriggeredCounter.add(1, {
-    source,
-    hazard_type: hazardType,
-    severity,
-    area_name: areaName,
-  });
+  metrics.getMeter(SCOPE_NAME)
+    .createCounter("alert_consumer.alerts.triggered_total", {
+      description: "Total number of emergency alerts triggered (SIAGA/AWAS or critical coastal)",
+    })
+    .add(1, { source, hazard_type: hazardType, severity, area_name: areaName });
 }
 
 export function recordMessageConsumed(
@@ -143,8 +111,10 @@ export function recordMessageConsumed(
   status: string,
   durationMs: number,
 ): void {
-  const inst = getInstruments();
-  inst.messagesConsumedCounter.add(1, {
+  const meter = metrics.getMeter(SCOPE_NAME);
+  meter.createCounter("alert_consumer.messages.consumed_total", {
+    description: "Total number of hazard events consumed by Alert Consumer",
+  }).add(1, {
     topic,
     source,
     hazard_type: hazardType,
@@ -152,7 +122,10 @@ export function recordMessageConsumed(
     is_emergency: String(isEmergency),
     status,
   });
-  inst.processingDurationHist.record(durationMs, { topic, status });
+  meter.createHistogram("alert_consumer.messages.processing_duration_ms", {
+    description: "Duration of processing a Kafka hazard event in milliseconds",
+    unit: "ms",
+  }).record(durationMs, { topic, status });
 }
 
 export function recordNotificationDelivery(status: "success" | "error", durationMs: number): void {

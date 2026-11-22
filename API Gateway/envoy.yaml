@@ -52,7 +52,7 @@ static_resources:
                             status: 200
                             body: { inline_string: "UP" }
                         - match: { path: "/auth/token" }
-                          route: { cluster: auth_service, timeout: 20s }
+                          route: { cluster: auth_service }
                           typed_per_filter_config:
                             envoy.filters.http.local_ratelimit:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
@@ -65,7 +65,7 @@ static_resources:
                                 runtime_key: rl_auth_token_enforced
                                 default_value: { numerator: 100, denominator: HUNDRED }
                         - match: { path: "/auth/refresh" }
-                          route: { cluster: auth_service, timeout: 20s }
+                          route: { cluster: auth_service }
                           typed_per_filter_config:
                             envoy.filters.http.local_ratelimit:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
@@ -78,7 +78,7 @@ static_resources:
                                 runtime_key: rl_auth_refresh_enforced
                                 default_value: { numerator: 100, denominator: HUNDRED }
                         - match: { prefix: "/.well-known/jwks.json"}
-                          route: { cluster: auth_service, timeout: 5s }
+                          route: { cluster: auth_service }
                         # JWT claim_to_headers supplies x-client-id before these routes are matched.
                         - match:
                             prefix: "/aggregate/"
@@ -87,7 +87,7 @@ static_resources:
                                 string_match: { exact: "media" }
                           route:
                             cluster: aggregator_service
-                            timeout: 25s
+                            timeout: 30s
                             retry_policy:
                               retry_on: connect-failure,refused-stream,unavailable,reset,5xx
                               num_retries: 1
@@ -113,7 +113,7 @@ static_resources:
                                 string_match: { exact: "lapangan" }
                           route:
                             cluster: aggregator_service
-                            timeout: 25s
+                            timeout: 30s
                             retry_policy:
                               retry_on: connect-failure,refused-stream,unavailable,reset,5xx
                               num_retries: 1
@@ -135,7 +135,7 @@ static_resources:
                         - match: { prefix: "/aggregate/" }
                           route:
                             cluster: aggregator_service
-                            timeout: 25s
+                            timeout: 30s
                             retry_policy:
                               retry_on: connect-failure,refused-stream,unavailable,reset,5xx
                               num_retries: 1
@@ -223,10 +223,8 @@ static_resources:
                             http_uri:
                               uri: "http://gateway-self/.well-known/jwks.json"
                               cluster: auth_jwks_http
-                              timeout: 5s
+                              timeout: 2s
                             cache_duration: 300s
-                            async_fetch:
-                              fast_listener: true
                       requirement_map:
                         auth_provider:
                           provider_name: auth_provider
@@ -258,26 +256,6 @@ static_resources:
     - name: auth_service
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
-      connect_timeout: 5s
-      dns_lookup_family: V4_ONLY
-      dns_refresh_rate: 2s
-      circuit_breakers:
-        thresholds:
-          - priority: DEFAULT
-            max_connections: 10000
-            max_pending_requests: 20000
-            max_requests: 20000
-            max_retries: 2000
-            retry_budget:
-              budget_percent:
-                value: 20.0
-              min_retry_concurrency: 10
-      health_checks:
-        - timeout: 5s
-          interval: 10s
-          unhealthy_threshold: 3
-          healthy_threshold: 1
-          grpc_health_check: {}
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
@@ -313,10 +291,6 @@ static_resources:
             max_pending_requests: 20000
             max_requests: 20000
             max_retries: 2000
-            retry_budget:
-              budget_percent:
-                value: 20.0
-              min_retry_concurrency: 10
       health_checks:
         - timeout: 2s
           interval: 2s

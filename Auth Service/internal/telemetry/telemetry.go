@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -24,99 +22,33 @@ import (
 
 const ScopeName = "auth-service"
 
-var (
-	rpcRequestsCounter  metric.Int64Counter
-	rpcDurationHist     metric.Float64Histogram
-	tokensIssuedCounter metric.Int64Counter
-	authFailuresCounter metric.Int64Counter
-	jwksRequestsCounter metric.Int64Counter
-	dbQueryDurationHist metric.Float64Histogram
-)
-
-func initInstruments(m metric.Meter) {
+func RecordRPC(ctx context.Context, method, statusCode string, durationMs float64) {
+	m := otel.Meter(ScopeName)
+	attrs := metric.WithAttributes(
+		attribute.String("rpc.method", method),
+		attribute.String("rpc.grpc.status_code", statusCode),
+	)
 	if c, err := m.Int64Counter(
 		"auth.rpc.requests_total",
 		metric.WithDescription("Total number of gRPC requests handled by Auth Service"),
 	); err == nil {
-		rpcRequestsCounter = c
+		c.Add(ctx, 1, attrs)
 	}
 	if h, err := m.Float64Histogram(
 		"auth.rpc.duration_ms",
 		metric.WithDescription("Duration of gRPC requests in milliseconds"),
 		metric.WithUnit("ms"),
 	); err == nil {
-		rpcDurationHist = h
-	}
-	if c, err := m.Int64Counter(
-		"auth.tokens.issued_total",
-		metric.WithDescription("Total number of access/refresh token pairs issued"),
-	); err == nil {
-		tokensIssuedCounter = c
-	}
-	if c, err := m.Int64Counter(
-		"auth.failures_total",
-		metric.WithDescription("Total number of authentication or token refresh failures"),
-	); err == nil {
-		authFailuresCounter = c
-	}
-	if c, err := m.Int64Counter(
-		"auth.jwks.requests_total",
-		metric.WithDescription("Total number of JWKS endpoint requests"),
-	); err == nil {
-		jwksRequestsCounter = c
-	}
-	if h, err := m.Float64Histogram(
-		"auth.db.query.duration_ms",
-		metric.WithDescription("Duration of PostgreSQL database queries in milliseconds"),
-		metric.WithUnit("ms"),
-	); err == nil {
-		dbQueryDurationHist = h
-	}
-}
-
-func samplerFromEnv() sdktrace.Sampler {
-	samplerName := strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER")))
-	ratio := 0.05
-	if rawArg := strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")); rawArg != "" {
-		if parsed, err := strconv.ParseFloat(rawArg, 64); err == nil && parsed >= 0 && parsed <= 1 {
-			ratio = parsed
-		}
-	}
-
-	switch samplerName {
-	case "always_on":
-		return sdktrace.AlwaysSample()
-	case "always_off":
-		return sdktrace.NeverSample()
-	case "traceidratio":
-		return sdktrace.TraceIDRatioBased(ratio)
-	case "parentbased_always_off":
-		return sdktrace.ParentBased(sdktrace.NeverSample())
-	case "parentbased_traceidratio":
-		return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
-	case "parentbased_always_on", "":
-		return sdktrace.ParentBased(sdktrace.AlwaysSample())
-	default:
-		return sdktrace.ParentBased(sdktrace.AlwaysSample())
-	}
-}
-
-func RecordRPC(ctx context.Context, method, statusCode string, durationMs float64) {
-	attrs := metric.WithAttributes(
-		attribute.String("rpc.method", method),
-		attribute.String("rpc.grpc.status_code", statusCode),
-	)
-	if rpcRequestsCounter != nil {
-		rpcRequestsCounter.Add(ctx, 1, attrs)
-	}
-	if rpcDurationHist != nil {
-		rpcDurationHist.Record(ctx, durationMs, attrs)
+		h.Record(ctx, durationMs, attrs)
 	}
 }
 
 func RecordTokenIssued(ctx context.Context, grantType, clientID, scope string) {
-	if tokensIssuedCounter != nil {
-		tokensIssuedCounter.Add(ctx, 1, metric.WithAttributes(
+	if c, err := otel.Meter(ScopeName).Int64Counter(
+		"auth.tokens.issued_total",
+		metric.WithDescription("Total number of access/refresh token pairs issued"),
+	); err == nil {
+		c.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("grant_type", grantType),
 			attribute.String("client_id", clientID),
 			attribute.String("scope", scope),
@@ -125,8 +57,11 @@ func RecordTokenIssued(ctx context.Context, grantType, clientID, scope string) {
 }
 
 func RecordAuthFailure(ctx context.Context, operation, reason string) {
-	if authFailuresCounter != nil {
-		authFailuresCounter.Add(ctx, 1, metric.WithAttributes(
+	if c, err := otel.Meter(ScopeName).Int64Counter(
+		"auth.failures_total",
+		metric.WithDescription("Total number of authentication or token refresh failures"),
+	); err == nil {
+		c.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("operation", operation),
 			attribute.String("reason", reason),
 		))
@@ -134,14 +69,21 @@ func RecordAuthFailure(ctx context.Context, operation, reason string) {
 }
 
 func RecordJWKSRequest(ctx context.Context) {
-	if jwksRequestsCounter != nil {
-		jwksRequestsCounter.Add(ctx, 1)
+	if c, err := otel.Meter(ScopeName).Int64Counter(
+		"auth.jwks.requests_total",
+		metric.WithDescription("Total number of JWKS endpoint requests"),
+	); err == nil {
+		c.Add(ctx, 1)
 	}
 }
 
 func RecordDBQuery(ctx context.Context, operation string, durationMs float64) {
-	if dbQueryDurationHist != nil {
-		dbQueryDurationHist.Record(ctx, durationMs, metric.WithAttributes(
+	if h, err := otel.Meter(ScopeName).Float64Histogram(
+		"auth.db.query.duration_ms",
+		metric.WithDescription("Duration of PostgreSQL database queries in milliseconds"),
+		metric.WithUnit("ms"),
+	); err == nil {
+		h.Record(ctx, durationMs, metric.WithAttributes(
 			attribute.String("db.operation", operation),
 		))
 	}
@@ -193,7 +135,6 @@ func Init(ctx context.Context, defaultServiceName string) (func(context.Context)
 	}
 
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSampler(samplerFromEnv()),
 		sdktrace.WithBatcher(traceExporter),
 		sdktrace.WithResource(res),
 	)
@@ -204,7 +145,6 @@ func Init(ctx context.Context, defaultServiceName string) (func(context.Context)
 		sdkmetric.WithResource(res),
 	)
 	otel.SetMeterProvider(mp)
-	initInstruments(otel.Meter(ScopeName))
 
 	lp := sdklog.NewLoggerProvider(
 		sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),

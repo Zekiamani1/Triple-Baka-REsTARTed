@@ -114,7 +114,7 @@ metadata:
 spec:
   clusterIP: None
   selector:
-    app: aggregate-api
+    app: aggregate
   ports:
     - name: grpc
       port: 50051
@@ -142,7 +142,7 @@ metadata:
   labels:
     app: auth-service
 spec:
-  clusterIP: None
+  type: ClusterIP
   selector:
     app: auth-service
   ports:
@@ -165,18 +165,6 @@ spec:
       port: 8080
       targetPort: 8080
       nodePort: 30080
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: gateway-admin
-  labels:
-    app: gateway
-spec:
-  type: ClusterIP
-  selector:
-    app: gateway
-  ports:
     - name: admin
       port: 9901
       targetPort: 9901

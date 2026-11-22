@@ -13,6 +13,4 @@ COPY . .
 COPY --from=grpcurl-builder /go/bin/grpcurl /usr/local/bin/grpcurl
 COPY proto/grpc/health/v1/health.proto /app/health.proto
 
-ENV NODE_OPTIONS="--max-old-space-size=512"
-
 CMD ["node", "--import", "tsx", "index.ts"]

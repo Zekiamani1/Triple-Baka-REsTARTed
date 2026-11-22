@@ -18,12 +18,10 @@ import path from "path";
 import { hostname } from "node:os";
 import { createHash } from "node:crypto";
 import { MongoClient } from "mongodb";
-import { normalizeAttributes, toStruct } from "./attributes";
 import { kafka, mongo, sensorPantai, service } from "./config";
 import {
   connectKafka,
   disconnectKafka,
-  ensureProducerConnected,
   isKafkaReady,
   publishFieldReport,
   publishHazard,
@@ -63,17 +61,11 @@ const healthPackageDefinition = protoLoader.loadSync(
 const proto = grpc.loadPackageDefinition(packageDefinition) as any;
 const healthProto = grpc.loadPackageDefinition(healthPackageDefinition) as any;
 
-const MONGO_QUERY_MAX_TIME_MS = 6000;
-const MONGO_HEALTH_INTERVAL_MS = 5000;
-const MONGO_HEALTH_PING_TIMEOUT_MS = 3000;
-const MONGO_HEALTH_FAILURE_THRESHOLD = 3;
-
 const mongoClient = new MongoClient(mongo.uri, {
     retryWrites: true,
     writeConcern: { w: "majority", journal: true, wtimeoutMS: 10000 },
     readConcern: { level: "local" },
-    serverSelectionTimeoutMS: 5000,
-    socketTimeoutMS: 8000,
+    serverSelectionTimeoutMS: 15000,
 });
 
 let collection: any;
@@ -82,41 +74,20 @@ let internalHttpServer: HttpServer | null = null;
 const server = new grpc.Server();
 let ready = false;
 let stopping = false;
-let mongoHealthy = false;
-let mongoConsecutiveFailures = 0;
-let mongoHealthTimer: NodeJS.Timeout | null = null;
 const healthWatchers = new Set<grpc.ServerWritableStream<any, any>>();
 
-function startMongoHealthMonitor(db: any): void {
-    mongoHealthy = true;
-    mongoConsecutiveFailures = 0;
-    let inFlight = false;
-    mongoHealthTimer = setInterval(async () => {
-        if (inFlight || stopping) return;
-        inFlight = true;
-        try {
-            await db.command({ ping: 1 }, { maxTimeMS: MONGO_HEALTH_PING_TIMEOUT_MS });
-            mongoHealthy = true;
-            mongoConsecutiveFailures = 0;
-        } catch {
-            mongoConsecutiveFailures += 1;
-            if (mongoConsecutiveFailures >= MONGO_HEALTH_FAILURE_THRESHOLD) {
-                mongoHealthy = false;
-            }
-        } finally {
-            inFlight = false;
-        }
-    }, MONGO_HEALTH_INTERVAL_MS);
-    mongoHealthTimer.unref();
-}
-
 function healthStatus(): string {
-    const kafkaOk = service.mode === "api" || isKafkaReady();
-    return ready && !stopping && mongoHealthy && kafkaOk ? "SERVING" : "NOT_SERVING";
+    return ready && !stopping && isKafkaReady() ? "SERVING" : "NOT_SERVING";
 }
 
-function currentHealthStatus(): string {
-    return healthStatus();
+async function currentHealthStatus(): Promise<string> {
+    if (healthStatus() !== "SERVING") return "NOT_SERVING";
+    try {
+        await mongoClient.db(mongo.dbName).command({ ping: 1 }, { timeoutMS: 1000 });
+        return healthStatus();
+    } catch {
+        return "NOT_SERVING";
+    }
 }
 
 const hazardPackage = proto.hazard;
@@ -171,13 +142,13 @@ function protoToHazard(protoHazard: any) {
         longitude: protoHazard.longitude,
         occurred_at: toDate(protoHazard.occurred_at),
         ingested_at: toDate(protoHazard.ingested_at),
-        attributes: normalizeAttributes(protoHazard.attributes),
+        attributes: fromStruct(protoHazard.attributes),
     }
 }
 
 function withoutDeliveryState(document: any): Record<string, unknown> {
     const { _id, partition_key, published, published_at, ...hazardEvent } = document;
-    return { ...hazardEvent, attributes: normalizeAttributes(hazardEvent.attributes) };
+    return { ...hazardEvent, attributes: plainAttributes(hazardEvent.attributes) };
 }
 
 async function trackMongoOp<T = any>(operation: string, fn: () => Promise<T>): Promise<T> {
@@ -216,7 +187,7 @@ async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean }): Prom
                     ...hazardEvent,
                     occurred_at: toDate(hazardEvent.occurred_at),
                     ingested_at: toDate(hazardEvent.ingested_at),
-                    attributes: normalizeAttributes(hazardEvent.attributes),
+                    attributes: plainAttributes(hazardEvent.attributes),
                 };
                 if (typeof hazardEvent.source !== "string" || !hazardEvent.source.trim() ||
                     typeof hazardEvent.source_ref_id !== "string" || !hazardEvent.source_ref_id.trim() ||
@@ -278,7 +249,7 @@ async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean }): Prom
                                     longitude: hazardEvent.longitude,
                                     occurred_at: hazardEvent.occurred_at,
                                     ingested_at: hazardEvent.ingested_at,
-                                    attributes: normalizeAttributes(hazardEvent.attributes),
+                                    attributes: plainAttributes(hazardEvent.attributes),
                                 },
                             }),
                         );
@@ -288,7 +259,6 @@ async function ingestHazard(hazardEvent: any, opts?: { upsert?: boolean }): Prom
                     }
                 }
 
-                await ensureProducerConnected();
                 await publishHazard(eventToPublish);
                 await trackMongoOp("updateOne", () =>
                     collection.updateOne(identity, {
@@ -435,7 +405,7 @@ async function fetchListHazardsPayload(
             ...h,
             occurred_at: toProtoTimestamp(h.occurred_at),
             ingested_at: toProtoTimestamp(h.ingested_at),
-            attributes: toStruct(normalizeAttributes(h.attributes)),
+            attributes: toStruct(plainAttributes(h.attributes)),
         })),
         total,
         partial: partialRes.partial,
@@ -569,10 +539,7 @@ async function getHazard(call: grpc.ServerUnaryCall<any, any>, callback: grpc.se
                 const hazardEvent = await trackMongoOp("findOne", () =>
                     collection.findOne(
                         { hazard_id: hazardId },
-                        {
-                            projection: { _id: 0, partition_key: 0, published: 0, published_at: 0 },
-                            maxTimeMS: MONGO_QUERY_MAX_TIME_MS,
-                        },
+                        { projection: { _id: 0, partition_key: 0, published: 0, published_at: 0 } },
                     ),
                 );
 
@@ -595,7 +562,7 @@ async function getHazard(call: grpc.ServerUnaryCall<any, any>, callback: grpc.se
                     ...hazardEvent,
                     occurred_at: toProtoTimestamp(hazardEvent.occurred_at),
                     ingested_at: toProtoTimestamp(hazardEvent.ingested_at),
-                    attributes: toStruct(normalizeAttributes(hazardEvent.attributes)),
+                    attributes: toStruct(plainAttributes(hazardEvent.attributes)),
                 });
             } catch (error: any) {
                 const durationMs = performance.now() - start;
@@ -629,7 +596,7 @@ async function main () {
     await collection.createIndex({ hazard_id: 1 });
     unprocessedCol = await ensureUnprocessedIndexes(db);
 
-    startMongoHealthMonitor(db);
+    await connectKafka();
     internalHttpServer = startInternalHttpServer({
         mongoClient,
         dbName: mongo.dbName,
@@ -638,11 +605,7 @@ async function main () {
         ingestHazard,
         publishFieldReport,
     });
-
-    const runIngester = service.mode === "ingester" || service.mode === "all";
-    if (runIngester) {
-        await connectKafka();
-        void runIngestConsumer({
+    void runIngestConsumer({
         onHazard: (hazard) => ingestHazard(hazard),
         onDlqMessage: async (dlq) => {
             await parkUnprocessedMessage(unprocessedCol, {
@@ -690,13 +653,12 @@ async function main () {
                 { $set: { status: "recovered", recovered_at: now, updated_at: now } },
             );
         },
-        }).catch((error) => {
-            logError("Kafka ingestion consumer failed", {
-                err: error instanceof Error ? error.message : String(error),
-            });
-            process.exit(1);
+    }).catch((error) => {
+        logError("Kafka ingestion consumer failed", {
+            err: error instanceof Error ? error.message : String(error),
         });
-    }
+        process.exit(1);
+    });
 
     server.addService(hazardPackage.Aggregate.service, {
         aggregateEvent,
@@ -704,12 +666,12 @@ async function main () {
         listHazards,
     } );
     server.addService(healthPackage.Health.service, {
-        Check: (call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) => {
+        Check: async (call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) => {
             if (call.request.service && call.request.service !== "hazard.Aggregate") {
                 callback({ code: grpc.status.NOT_FOUND, message: "Unknown service" });
                 return;
             }
-            callback(null, { status: currentHealthStatus() });
+            callback(null, { status: await currentHealthStatus() });
         },
         Watch: (call: grpc.ServerWritableStream<any, any>) => {
             if (call.request.service && call.request.service !== "hazard.Aggregate") {
@@ -719,15 +681,15 @@ async function main () {
             }
             healthWatchers.add(call);
             let previous = "";
-            const publish = () => {
-                const status = currentHealthStatus();
+            const publish = async () => {
+                const status = await currentHealthStatus();
                 if (healthWatchers.has(call) && status !== previous) {
                     previous = status;
                     call.write({ status });
                 }
             };
-            publish();
-            const timer = setInterval(() => { publish(); }, 2000);
+            void publish();
+            const timer = setInterval(() => { void publish(); }, 2000);
             const cleanup = () => {
                 clearInterval(timer);
                 healthWatchers.delete(call);
@@ -750,9 +712,8 @@ async function main () {
             ready = true;
             logInfo("Aggregate Service started", {
                 instance_id: hostname(),
-                mode: service.mode,
                 grpc_port: port,
-                kafka_in_topic: runIngester ? kafka.inTopic : undefined,
+                kafka_in_topic: kafka.inTopic,
                 kafka_out_topic: kafka.outTopic,
             });
         }
@@ -764,10 +725,6 @@ async function shutdown(exitCode = 0) {
   stopping = true;
   ready = false;
   if (sensorPantaiStatusRefresh) clearInterval(sensorPantaiStatusRefresh);
-  if (mongoHealthTimer) {
-    clearInterval(mongoHealthTimer);
-    mongoHealthTimer = null;
-  }
   logInfo("Aggregate Service draining", { instance_id: hostname() });
   for (const call of healthWatchers) {
     call.write({ status: "NOT_SERVING" });
@@ -837,4 +794,42 @@ function toDate(value: unknown): Date {
 function toProtoTimestamp(date: Date): { seconds: number; nanos: number } {
   const ms = date.getTime();
   return { seconds: Math.floor(ms / 1000), nanos: (ms % 1000) * 1e6 };
+}
+
+// plain JS -> protobuf Struct (for responses)
+function toProtoValue(v: unknown): any {
+  if (v === null || v === undefined) return { nullValue: "NULL_VALUE" };
+  if (v instanceof Date) return { stringValue: v.toISOString() };
+  if (typeof v === "number") return { numberValue: v };
+  if (typeof v === "string") return { stringValue: v };
+  if (typeof v === "boolean") return { boolValue: v };
+  if (Array.isArray(v)) return { listValue: { values: v.map(toProtoValue) } };
+  if (typeof v === "object") return { structValue: toStruct(v as Record<string, unknown>) };
+  return { stringValue: String(v) };
+}
+
+function toStruct(obj: Record<string, unknown> | undefined): any {
+  return {
+    fields: Object.fromEntries(
+      Object.entries(obj ?? {}).map(([k, v]) => [k, toProtoValue(v)]),
+    ),
+  };
+}
+
+// protobuf Struct -> plain JS (for requests)
+function fromProtoValue(v: any): unknown {
+  switch (v?.kind) {
+    case "numberValue": return v.numberValue;
+    case "stringValue": return v.stringValue;
+    case "boolValue": return v.boolValue;
+    case "structValue": return fromStruct(v.structValue);
+    case "listValue": return (v.listValue?.values ?? []).map(fromProtoValue);
+    default: return null;
+  }
+}
+
+function fromStruct(s: any): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(s?.fields ?? {}).map(([k, v]) => [k, fromProtoValue(v)]),
+  );
 }

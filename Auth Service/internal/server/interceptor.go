@@ -145,28 +145,11 @@ func Logging() grpc.UnaryServerInterceptor {
 		start := time.Now()
 		resp, err = handler(ctx, req)
 		duration := time.Since(start)
-		code := status.Code(err)
 
-		if err != nil {
-			if code == codes.Internal {
-				slog.ErrorContext(ctx, "rpc failed",
-					"method", info.FullMethod,
-					"code", code.String(),
-					"duration_ms", duration.Milliseconds(),
-					"err", err)
-			} else {
-				slog.WarnContext(ctx, "rpc failed",
-					"method", info.FullMethod,
-					"code", code.String(),
-					"duration_ms", duration.Milliseconds(),
-					"err", err)
-			}
-		} else if !strings.HasPrefix(info.FullMethod, "/grpc.health.") {
-			slog.DebugContext(ctx, "rpc completed",
-				"method", info.FullMethod,
-				"code", code.String(),
-				"duration_ms", duration.Milliseconds())
-		}
+		slog.InfoContext(ctx, "rpc completed",
+			"method", info.FullMethod,
+			"code", status.Code(err).String(),
+			"duration_ms", duration.Milliseconds())
 		return resp, err
 	}
 }

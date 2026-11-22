@@ -22,6 +22,11 @@ spec:
         - name: kafka-aggregate
           image: apache/kafka:latest
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "512Mi"
+            limits:
+              memory: "1Gi"
           ports:
             - containerPort: 29092
               name: internal
@@ -32,13 +37,6 @@ spec:
           envFrom:
             - configMapRef:
                 name: kafka-env
-          resources:
-            requests:
-              cpu: "250m"
-              memory: "512Mi"
-            limits:
-              cpu: "1000m"
-              memory: "1536Mi"
           volumeMounts:
             - name: kafka-data
               mountPath: /var/lib/kafka/data
@@ -104,9 +102,9 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: aggregate-api
+  name: aggregate
   labels:
-    app: aggregate-api
+    app: aggregate
 spec:
   replicas: 4
   strategy:
@@ -116,24 +114,15 @@ spec:
       maxSurge: 1
   selector:
     matchLabels:
-      app: aggregate-api
+      app: aggregate
   template:
     metadata:
       labels:
-        app: aggregate-api
+        app: aggregate
         role: aggregator
     spec:
       serviceAccountName: aggregate-reader
       terminationGracePeriodSeconds: 40
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchLabels:
-                    app: aggregate-api
-                topologyKey: kubernetes.io/hostname
       initContainers:
         - name: wait-for-mongo
           image: percona/percona-server-mongodb:8.0.4-1-multi
@@ -165,6 +154,11 @@ spec:
         - name: aggregate
           image: triple-baka-restarted-aggregate:latest
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "256Mi"
+            limits:
+              memory: "512Mi"
           ports:
             - containerPort: 50051
               name: grpc
@@ -187,103 +181,9 @@ spec:
             - name: SENSOR_PANTAI_STATUS_URL
               value: "http://coastal-adapter:8089/internal/source-status"
             - name: NODE_OPTIONS
-              value: "--max-old-space-size=512"
+              value: "--max-old-space-size=384"
             - name: MONGO_URI
               value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin&readPreference=secondaryPreferred
-          resources:
-            requests:
-              cpu: "500m"
-              memory: "256Mi"
-            limits:
-              cpu: "1500m"
-              memory: "768Mi"
-          readinessProbe:
-            grpc:
-              port: 50051
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            timeoutSeconds: 5
-            failureThreshold: 20
-          livenessProbe:
-            grpc:
-              port: 50051
-            initialDelaySeconds: 60
-            periodSeconds: 15
-            timeoutSeconds: 10
-            failureThreshold: 10
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: aggregate-ingester
-  labels:
-    app: aggregate-ingester
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: aggregate-ingester
-  template:
-    metadata:
-      labels:
-        app: aggregate-ingester
-    spec:
-      terminationGracePeriodSeconds: 40
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchLabels:
-                    app: aggregate-ingester
-                topologyKey: kubernetes.io/hostname
-      initContainers:
-        - name: wait-for-mongo
-          image: percona/percona-server-mongodb:8.0.4-1-multi
-          imagePullPolicy: IfNotPresent
-          envFrom:
-            - configMapRef:
-                name: aggregate-env
-            - secretRef:
-                name: mongo-cluster-secrets
-          env:
-            - name: MONGO_URI
-              value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin
-          command:
-            - /bin/sh
-            - -c
-            - |
-              until mongosh "$MONGO_URI" --quiet --eval 'const dbName = process.env.MONGO_DB_NAME || "bnpb"; const colName = process.env.MONGO_COLLECTION || "hazard_events"; quit(db.getSiblingDB(dbName).getCollection("_cluster_setup").findOne({ _id: `${dbName}.${colName}`, rangesReady: true }) ? 0 : 1)' >/dev/null 2>&1; do
-                echo "Waiting for mongo-cluster-init to finish sharding setup..."
-                sleep 3
-              done
-      containers:
-        - name: aggregate
-          image: triple-baka-restarted-aggregate:latest
-          imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 50051
-              name: grpc
-          envFrom:
-            - configMapRef:
-                name: aggregate-env
-            - secretRef:
-                name: mongo-cluster-secrets
-          env:
-            - name: AGGREGATE_MODE
-              value: "ingester"
-            - name: NODE_OPTIONS
-              value: "--max-old-space-size=512"
-            - name: MONGO_URI
-              value: mongodb://$(MONGODB_DATABASE_ADMIN_USER):$(MONGODB_DATABASE_ADMIN_PASSWORD)@mongo-router:27017/?authSource=admin
-          resources:
-            requests:
-              cpu: "250m"
-              memory: "256Mi"
-            limits:
-              cpu: "1000m"
-              memory: "768Mi"
           readinessProbe:
             grpc:
               port: 50051
@@ -320,19 +220,17 @@ spec:
         - name: bmkg-poller
           image: triple-baka-restarted-bmkg-poller:latest
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "256Mi"
+            limits:
+              memory: "512Mi"
           ports:
             - containerPort: 8085
               name: health
           envFrom:
             - secretRef:
                 name: bmkg-poller-env
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "64Mi"
-            limits:
-              cpu: "250m"
-              memory: "256Mi"
           readinessProbe:
             httpGet:
               path: /health
@@ -371,19 +269,17 @@ spec:
         - name: pvmbg-poller
           image: triple-baka-restarted-pvmbg-poller:latest
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "256Mi"
+            limits:
+              memory: "512Mi"
           ports:
             - containerPort: 8086
               name: health
           envFrom:
             - secretRef:
                 name: pvmbg-poller-env
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "64Mi"
-            limits:
-              cpu: "250m"
-              memory: "256Mi"
           readinessProbe:
             httpGet:
               path: /health
@@ -425,19 +321,17 @@ spec:
           env:
             - name: NODE_OPTIONS
               value: "--max-old-space-size=192"
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           ports:
             - containerPort: 8087
               name: health
           envFrom:
             - configMapRef:
                 name: event-consumer-env
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "384Mi"
           readinessProbe:
             httpGet:
               path: /health
@@ -510,19 +404,17 @@ spec:
                 secretKeyRef:
                   name: field-receiver-token
                   key: token
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           ports:
             - containerPort: 8088
               name: health
           envFrom:
             - configMapRef:
                 name: alert-consumer-env
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "384Mi"
           readinessProbe:
             httpGet:
               path: /health
@@ -540,75 +432,6 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 6
 ---
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: auth-keygen
-  labels:
-    app: auth-keygen
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: auth-keygen
-  labels:
-    app: auth-keygen
-rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    resourceNames: ["auth-keys"]
-    verbs: ["get"]
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["create"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: auth-keygen
-  labels:
-    app: auth-keygen
-subjects:
-  - kind: ServiceAccount
-    name: auth-keygen
-roleRef:
-  kind: Role
-  name: auth-keygen
-  apiGroup: rbac.authorization.k8s.io
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: auth-keygen
-  labels:
-    app: auth-keygen
-spec:
-  ttlSecondsAfterFinished: 60
-  template:
-    metadata:
-      labels:
-        app: auth-keygen
-    spec:
-      serviceAccountName: auth-keygen
-      restartPolicy: OnFailure
-      containers:
-        - name: auth-keygen
-          image: auth-service:dev
-          imagePullPolicy: IfNotPresent
-          command: ["./auth-service", "keygen-secret"]
-          env:
-            - name: AUTH_KEYS_SECRET_NAME
-              value: auth-keys
-            - name: AUTH_KEYS_SECRET_KEY
-              value: private.pem
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "32Mi"
-            limits:
-              cpu: "250m"
-              memory: "128Mi"
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -616,7 +439,9 @@ metadata:
   labels:
     app: auth-service
 spec:
-  replicas: 3
+  replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: auth-service
@@ -626,15 +451,6 @@ spec:
         app: auth-service
         role: api
     spec:
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchLabels:
-                    app: auth-service
-                topologyKey: kubernetes.io/hostname
       initContainers:
         - name: auth-keygen
           image: auth-service:dev
@@ -672,19 +488,17 @@ spec:
         - name: auth-service
           image: auth-service:dev
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           ports:
             - containerPort: 8083
               name: grpc
           envFrom:
             - secretRef:
                 name: auth-env
-          resources:
-            requests:
-              cpu: "250m"
-              memory: "128Mi"
-            limits:
-              cpu: "1500m"
-              memory: "512Mi"
           volumeMounts:
             - name: auth-keys
               mountPath: /app/keys
@@ -705,9 +519,8 @@ spec:
             failureThreshold: 6
       volumes:
         - name: auth-keys
-          secret:
-            secretName: auth-keys
-            defaultMode: 0400
+          persistentVolumeClaim:
+            claimName: auth-keys
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -716,12 +529,12 @@ metadata:
   labels:
     app: gateway
 spec:
+  replicas: 3
   strategy:
     type: RollingUpdate
     rollingUpdate:
       maxUnavailable: 0
       maxSurge: 1
-  replicas: 4
   selector:
     matchLabels:
       app: gateway
@@ -731,15 +544,6 @@ spec:
         app: gateway
         role: api
     spec:
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchLabels:
-                    app: gateway
-                topologyKey: kubernetes.io/hostname
       containers:
         - name: gateway
           image: envoyproxy/envoy:v1.31-latest
@@ -753,18 +557,16 @@ spec:
             preStop:
               exec:
                 command: ["sh", "-c", "sleep 5"]
+          resources:
+            requests:
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
           ports:
             - containerPort: 8080
               name: http
             - containerPort: 9901
               name: admin
-          resources:
-            requests:
-              cpu: "500m"
-              memory: "256Mi"
-            limits:
-              cpu: "2000m"
-              memory: "768Mi"
           volumeMounts:
             - name: gateway-config
               mountPath: /etc/envoy/envoy.yaml
