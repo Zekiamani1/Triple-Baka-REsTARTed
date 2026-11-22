@@ -156,6 +156,61 @@ export function buildShardLocations(
   return locations;
 }
 
+function bsonBoundRank(val: unknown): number {
+  if (val && typeof val === "object" && "_bsontype" in val) {
+    const t = (val as { _bsontype?: string })._bsontype;
+    if (t === "MinKey") return -1;
+    if (t === "MaxKey") return 1;
+  }
+  return 0;
+}
+
+function compareBsonShardValue(docVal: unknown, boundVal: unknown): number {
+  const docRank = bsonBoundRank(docVal);
+  const boundRank = bsonBoundRank(boundVal);
+  if (docRank !== boundRank) return docRank < boundRank ? -1 : 1;
+  if (docRank !== 0) return 0;
+
+  const a = docVal === null || docVal === undefined ? "" : String(docVal);
+  const b = boundVal === null || boundVal === undefined ? "" : String(boundVal);
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
+function compareCompoundKey(
+  doc: Record<string, unknown>,
+  bound: Record<string, unknown>,
+  keyFields: string[],
+): number {
+  for (const field of keyFields) {
+    const cmp = compareBsonShardValue(doc[field], bound[field]);
+    if (cmp !== 0) return cmp;
+  }
+  return 0;
+}
+
+export function resolveChunkShard(
+  doc: Record<string, unknown>,
+  chunks: Array<{ min?: Record<string, unknown>; max?: Record<string, unknown>; shard?: unknown }>,
+  keyPattern?: Record<string, unknown>,
+): string {
+  const keyFields =
+    keyPattern && Object.keys(keyPattern).length > 0
+      ? Object.keys(keyPattern)
+      : ["partition_key", "source", "source_ref_id"];
+
+  for (const chunk of chunks) {
+    if (!chunk.min || !chunk.max || !chunk.shard) continue;
+    if (
+      compareCompoundKey(doc, chunk.min, keyFields) >= 0 &&
+      compareCompoundKey(doc, chunk.max, keyFields) < 0
+    ) {
+      return String(chunk.shard);
+    }
+  }
+  return "unknown";
+}
+
 async function resolveShardPrimaryHost(
   mongoClient: MongoClient,
   hostStr: string,
@@ -367,12 +422,12 @@ export async function handleAuditRoute(
     const collMeta = await configDb.collection("collections").findOne({ _id: namespace as any });
     let shardId = "unknown";
     if (collMeta?.uuid) {
-      const chunk = await configDb.collection("chunks").findOne({
-        uuid: collMeta.uuid,
-        "min.partition_key": { $lte: doc.partition_key },
-        "max.partition_key": { $gt: doc.partition_key },
-      });
-      if (chunk?.shard) shardId = String(chunk.shard);
+      const chunks = await configDb.collection("chunks").find({ uuid: collMeta.uuid }).toArray();
+      shardId = resolveChunkShard(
+        doc as Record<string, unknown>,
+        chunks as Array<{ min?: Record<string, unknown>; max?: Record<string, unknown>; shard?: unknown }>,
+        collMeta.key as Record<string, unknown> | undefined,
+      );
     }
 
     const shardDoc = await configDb.collection("shards").findOne({ _id: shardId as any });

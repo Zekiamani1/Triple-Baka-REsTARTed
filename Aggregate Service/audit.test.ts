@@ -6,6 +6,7 @@ import {
   computeByteOrderChecksum,
   decodeCursor,
   encodeCursor,
+  resolveChunkShard,
   unwrapAttributes,
   verifyAuditBearerToken,
 } from "./auditServer";
@@ -85,4 +86,36 @@ test("buildShardLocations resolves live primary, unique replica units, and fallb
     { node: "worker-2", unit: "shard2RS-r1", role: "replica" },
     { node: "worker-3", unit: "shard2RS-r2", role: "replica" },
   ]);
+});
+
+test("resolveChunkShard matches BSON MinKey/MaxKey bounds and compound tie-breakers", () => {
+  const minKey = { _bsontype: "MinKey" };
+  const maxKey = { _bsontype: "MaxKey" };
+  const chunks = [
+    {
+      min: { partition_key: minKey, source: minKey, source_ref_id: minKey },
+      max: { partition_key: "8", source: minKey, source_ref_id: minKey },
+      shard: "shard1RS",
+    },
+    {
+      min: { partition_key: "8", source: minKey, source_ref_id: minKey },
+      max: { partition_key: maxKey, source: maxKey, source_ref_id: maxKey },
+      shard: "shard2RS",
+    },
+  ];
+  const keyPattern = { partition_key: 1, source: 1, source_ref_id: 1 };
+
+  assert.equal(
+    resolveChunkShard({ partition_key: "3abc", source: "BMKG", source_ref_id: "eq-1" }, chunks, keyPattern),
+    "shard1RS",
+  );
+  assert.equal(
+    resolveChunkShard({ partition_key: "b7e55c", source: "SATELIT", source_ref_id: "fire-1" }, chunks, keyPattern),
+    "shard2RS",
+  );
+  // Boundary tie on partition_key="8": max.source is MinKey on shard1RS so BMKG belongs on shard2RS.
+  assert.equal(
+    resolveChunkShard({ partition_key: "8", source: "BMKG", source_ref_id: "eq-2" }, chunks, keyPattern),
+    "shard2RS",
+  );
 });
